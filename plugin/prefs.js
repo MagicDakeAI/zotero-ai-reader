@@ -1,6 +1,10 @@
 pref("extensions.zotero-ai-reader.model", "deepseek-flash");
+pref("extensions.zotero-ai-reader.profiles", "[]");
+pref("extensions.zotero-ai-reader.activeProfileId", "deepseek");
 pref("extensions.zotero-ai-reader.timeoutMs", 90000);
 pref("extensions.zotero-ai-reader.retryCount", 2);
 pref("extensions.zotero-ai-reader.maxBatchChars", 7000);
 pref("extensions.zotero-ai-reader.concurrency", 2);
 pref("extensions.zotero-ai-reader.translationFontSize", 16);
+pref("extensions.zotero-ai-reader.questionContentSource", "original");
+pref("extensions.zotero-ai-reader.questionPromptTemplate", "请用通俗中文解释以下论文段落，并说明关键术语、核心逻辑以及它在全文中的作用：\n\n{content}");

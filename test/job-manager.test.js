@@ -37,14 +37,14 @@ const baseParagraph = (index = 1) => ({
 });
 const request = { itemID: 1, itemKey: "KEY", sourceHash: "pdf-hash", pages: [1] };
 
-function managerWith({ cache = new FakeCache(), paragraphs = [baseParagraph()], translator, extract } = {}) {
+function managerWith({ cache = new FakeCache(), paragraphs = [baseParagraph()], translator, extract, configProvider = config } = {}) {
   let id = 0;
   return new JobManager({
     cache,
     translator: translator || { translate: async (batch) => batch.map((item) => ({
       ...item, translation: "译文", summary: "摘要", processing_status: "completed",
     })) },
-    configProvider: config,
+    configProvider,
     extract: extract || (async (_itemID, _pages, { onPage }) => {
       onPage?.({ current: 1, total: 1, page: 1 });
       return { pages: [{ page: 1, width: 100, height: 100 }], paragraphs };
@@ -208,6 +208,30 @@ test("提取阶段可以取消", async () => {
   manager.cancelJob(created.id);
   const job = await waitFor(manager, created.id);
   assert.equal(job.status, "cancelled");
+});
+
+test("任务创建时快照服务、URL 和模型配置", async () => {
+  let current = {
+    profileId: "custom-a", profileName: "服务 A", providerId: "custom",
+    baseUrl: "https://a.example/v1", model: "model-a", requiresApiKey: true,
+    maxBatchChars: 1000, concurrency: 1,
+  };
+  let received;
+  const manager = managerWith({
+    configProvider: () => current,
+    translator: { translate: async (batch, options) => {
+      received = options.config;
+      return batch.map((item) => ({ ...item, translation: "译文", summary: "摘要", processing_status: "completed" }));
+    } },
+  });
+  const created = manager.createJob(request);
+  current = { ...current, profileId: "custom-b", profileName: "服务 B", baseUrl: "https://b.example/v1", model: "model-b" };
+  const job = await waitFor(manager, created.id);
+  assert.equal(job.profileId, "custom-a");
+  assert.equal(job.provider, "服务 A");
+  assert.equal(job.model, "model-a");
+  assert.equal(received.baseUrl, "https://a.example/v1");
+  assert.equal(received.model, "model-a");
 });
 
 test("仅跳过边缘纯页码和至少三页重复页眉", () => {

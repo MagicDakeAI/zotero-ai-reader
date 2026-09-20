@@ -3,7 +3,6 @@ var AIReader = (() => {
   const overlayStates = new Map();
   const taskStates = new Map();
   const tooltipCloseTimers = new WeakMap();
-  const CHATGPT_EXPLANATION_PREFIX = "请用通俗中文解释以下论文译文，并说明关键术语：\n\n";
   let toolbarHandler;
   let pluginRootURI = "";
 
@@ -141,7 +140,9 @@ var AIReader = (() => {
       });
       if (!totalPages) return;
     }
-    task.keyStatus = await Zotero.AIReaderService.getAPIKeyStatus().catch(() => ({ configured: false, masked: "" }));
+    task.profiles = await Zotero.AIReaderService.listProfiles().catch(() => []);
+    task.activeProfile = task.profiles.find((profile) => profile.active) || task.profiles[0] || null;
+    task.keyStatus = task.activeProfile?.keyStatus || { configured: false, masked: "" };
     const displaySettings = Zotero.AIReaderService.getSettings?.() || { translationFontSize: 16 };
 
     const modal = doc.createElement("div");
@@ -151,7 +152,7 @@ var AIReader = (() => {
         <header class="zai-dialog-header">
           <div><h2 id="zai-title">AI 翻译</h2><p class="zai-dialog-subtitle">选择页面后，本地缓存会优先复用。</p></div>
           <div class="zai-dialog-tools">
-            <button type="button" class="zai-settings-toggle zai-icon-button" data-action="toggle-settings" aria-label="译文显示设置" aria-expanded="false">⚙</button>
+            <button type="button" class="zai-settings-toggle zai-icon-button" data-action="toggle-settings" aria-label="阅读与提问设置" title="阅读与提问设置" aria-expanded="false">⚙</button>
             <button type="button" class="zai-close zai-icon-button" data-action="close" aria-label="关闭任务卡片">×</button>
           </div>
         </header>
@@ -164,10 +165,35 @@ var AIReader = (() => {
           </div>
           <div class="zai-font-preview" style="font-size:${displaySettings.translationFontSize}px">译文字号预览</div>
           <div class="zai-font-feedback" role="status" aria-live="polite"></div>
+          <div class="zai-question-settings">
+            <div class="zai-settings-heading">复制提问</div>
+            <label>段落内容
+              <select class="zai-question-source">
+                <option value="original">英文原文（默认）</option>
+                <option value="translation">中文译文</option>
+                <option value="bilingual">中英对照</option>
+              </select>
+            </label>
+            <label>提问模板
+              <textarea class="zai-question-template" rows="5" spellcheck="false"></textarea>
+            </label>
+            <div class="zai-question-help">变量：{content}、{original}、{translation}、{summary}、{page}</div>
+            <pre class="zai-question-preview" aria-label="提问预览"></pre>
+            <div class="zai-question-actions">
+              <button type="button" class="zai-button zai-button--ghost zai-button--compact" data-action="reset-question">恢复默认</button>
+              <button type="button" class="zai-button zai-button--secondary zai-button--compact" data-action="save-question">保存提问设置</button>
+            </div>
+            <div class="zai-question-feedback" role="status" aria-live="polite"></div>
+          </div>
+        </div>
+        <div class="zai-provider-setup">
+          <label>AI 服务 <select class="zai-profile-select" aria-label="AI 服务"></select></label>
+          <label>模型 <span class="zai-model-row"><input class="zai-model-input" type="text" list="zai-dialog-model-list" placeholder="输入模型 ID" spellcheck="false"><button type="button" class="zai-button zai-button--secondary" data-action="load-models">加载模型</button></span></label>
+          <datalist id="zai-dialog-model-list"></datalist>
         </div>
         <div class="zai-key-setup" hidden>
           <p><strong>首次使用</strong></p>
-          <p>填写 DeepSeek API Key。验证成功后会保存到 Zotero 的加密登录存储中。</p>
+          <p>填写当前服务的 API Key。验证后会独立保存到 Zotero 的加密登录存储中。</p>
           <label>API Key <input class="zai-api-key" type="password" placeholder="sk-…" autocomplete="off"></label>
           <p class="zai-help">验证连接不会产生模型 Token；插件不会把密钥写入日志或翻译缓存。</p>
         </div>
@@ -190,6 +216,11 @@ var AIReader = (() => {
       </div>`;
     doc.body.append(modal);
     task.modal = modal;
+    modal.querySelector(".zai-question-source").value = displaySettings.questionContentSource || "original";
+    modal.querySelector(".zai-question-template").value = displaySettings.questionPromptTemplate
+      || Zotero.AIReaderService.DEFAULT_QUESTION_PROMPT_TEMPLATE;
+    updateQuestionSettingsPreview(task);
+    populateDialogProfiles(task);
     task.returnFocus = [...task.buttons].find((button) => button.isConnected) || null;
 
     const close = () => closeDialog(task);
@@ -201,19 +232,28 @@ var AIReader = (() => {
       if (action === "force-start") return startForcedTask(task);
       if (action === "toggle-settings") return toggleDisplaySettings(task);
       if (action === "save-font") return saveTranslationFontSize(task);
+      if (action === "save-question") return saveQuestionSettingsFromDialog(task);
+      if (action === "reset-question") return resetQuestionSettingsInDialog(task);
       if (action === "detect-range") return detectRange(task, totalPages);
       if (action === "collapse") return close();
       if (action === "cancel-job") return cancelTask(task);
       if (action === "retry") return startTask(task, true);
       if (action === "restart") return startTask(task, false, true);
       if (action === "save-key") return configureKeyFromDialog(task);
+      if (action === "load-models") return loadDialogModels(task);
+    });
+    modal.addEventListener("change", (event) => {
+      if (event.target.matches?.(".zai-profile-select")) switchDialogProfile(task, event.target.value);
+      if (event.target.matches?.(".zai-question-source")) updateQuestionSettingsPreview(task);
     });
     modal.addEventListener("input", (event) => {
-      if (!event.target.matches?.(".zai-font-slider")) return;
-      const value = event.target.value;
-      modal.querySelector(".zai-font-value").textContent = `${value} px`;
-      modal.querySelector(".zai-font-preview").style.fontSize = `${value}px`;
-      modal.querySelector(".zai-font-feedback").textContent = "";
+      if (event.target.matches?.(".zai-font-slider")) {
+        const value = event.target.value;
+        modal.querySelector(".zai-font-value").textContent = `${value} px`;
+        modal.querySelector(".zai-font-preview").style.fontSize = `${value}px`;
+        modal.querySelector(".zai-font-feedback").textContent = "";
+      }
+      if (event.target.matches?.(".zai-question-template")) updateQuestionSettingsPreview(task);
     });
     task.keyHandler = (event) => {
       if (event.key === "Escape") {
@@ -221,7 +261,7 @@ var AIReader = (() => {
         close();
       }
       if (event.key === "Tab") {
-        const targets = [...modal.querySelectorAll('button, input, [tabindex="0"]')]
+        const targets = [...modal.querySelectorAll('button, input, select, [tabindex="0"]')]
           .filter((node) => !node.disabled && node.getClientRects().length);
         const first = targets[0];
         const last = targets[targets.length - 1];
@@ -237,6 +277,62 @@ var AIReader = (() => {
     (task.job ? modal.querySelector('.zai-dialog') : task.keyStatus?.configured
       ? modal.querySelector(".zai-pages")
       : modal.querySelector(".zai-api-key"))?.focus();
+  }
+
+  function populateDialogProfiles(task) {
+    const select = task.modal?.querySelector(".zai-profile-select");
+    if (!select) return;
+    select.replaceChildren(...(task.profiles || []).map((profile) => {
+      const option = task.doc.createElement("option");
+      option.value = profile.id;
+      option.textContent = profile.name;
+      return option;
+    }));
+    if (task.activeProfile) select.value = task.activeProfile.id;
+    const model = task.modal.querySelector(".zai-model-input");
+    if (model) model.value = task.activeProfile?.model || "";
+  }
+
+  async function switchDialogProfile(task, profileId) {
+    try {
+      Zotero.AIReaderService.setActiveProfile(profileId);
+      task.profiles = await Zotero.AIReaderService.listProfiles();
+      task.activeProfile = task.profiles.find((profile) => profile.id === profileId);
+      task.keyStatus = task.activeProfile?.keyStatus || { configured: false, masked: "" };
+      task.setupError = null;
+      populateDialogProfiles(task);
+    } catch (error) {
+      task.setupError = error.message || "切换 AI 服务失败";
+    }
+    renderTaskDialog(task);
+  }
+
+  async function saveDialogModel(task) {
+    const profile = task.activeProfile;
+    const model = task.modal?.querySelector(".zai-model-input")?.value?.trim() || "";
+    if (!profile) throw new Error("请先选择 AI 服务");
+    if (!model) throw new Error(`请为 ${profile.name} 选择或填写模型 ID`);
+    const saved = Zotero.AIReaderService.upsertProfile({ ...profile, model });
+    Zotero.AIReaderService.setActiveProfile(saved.id);
+    task.activeProfile = { ...profile, ...saved, active: true };
+  }
+
+  async function loadDialogModels(task) {
+    const profile = task.activeProfile;
+    if (!profile) return;
+    task.setupError = `正在从 ${profile.name} 加载模型…`;
+    renderTaskDialog(task);
+    try {
+      const models = await Zotero.AIReaderService.listModels(profile.id);
+      const list = task.modal?.querySelector("#zai-dialog-model-list");
+      list?.replaceChildren(...models.map((model) => {
+        const option = task.doc.createElement("option"); option.value = model; return option;
+      }));
+      task.setupError = `已加载 ${models.length} 个模型，也可手动输入。`;
+    } catch (error) {
+      task.setupError = error.message || "模型加载失败";
+    }
+    renderTaskDialog(task);
   }
 
   function toggleDisplaySettings(task) {
@@ -262,6 +358,63 @@ var AIReader = (() => {
     } catch (error) {
       feedback.textContent = `保存失败：${error.message}`;
     }
+  }
+
+  function questionSettingsFromDialog(task) {
+    return {
+      questionContentSource: task.modal?.querySelector(".zai-question-source")?.value || "original",
+      questionPromptTemplate: task.modal?.querySelector(".zai-question-template")?.value || "",
+    };
+  }
+
+  function updateQuestionSettingsPreview(task) {
+    const preview = task.modal?.querySelector(".zai-question-preview");
+    const feedback = task.modal?.querySelector(".zai-question-feedback");
+    if (!preview || !feedback) return;
+    try {
+      const input = questionSettingsFromDialog(task);
+      const inspection = Zotero.AIReaderService.inspectQuestionPromptTemplate(input.questionPromptTemplate);
+      preview.textContent = Zotero.AIReaderService.buildQuestionPrompt({
+        page: 3,
+        original: "Foundation models can generalize across medical imaging tasks.",
+        translation: "基础模型可以在多种医学影像任务之间泛化。",
+        summary: "基础模型具有跨任务泛化能力。",
+      }, input);
+      feedback.textContent = inspection.warnings.join(" ");
+      feedback.dataset.state = inspection.warnings.length ? "warning" : "";
+    } catch (error) {
+      preview.textContent = "";
+      feedback.textContent = error.message || "模板无效。";
+      feedback.dataset.state = "error";
+    }
+  }
+
+  function saveQuestionSettingsFromDialog(task) {
+    const feedback = task.modal?.querySelector(".zai-question-feedback");
+    if (!feedback) return;
+    try {
+      const input = questionSettingsFromDialog(task);
+      const inspection = Zotero.AIReaderService.inspectQuestionPromptTemplate(input.questionPromptTemplate);
+      Zotero.AIReaderService.saveSettings({ ...Zotero.AIReaderService.getSettings(), ...input });
+      feedback.textContent = inspection.warnings.length
+        ? `已保存。${inspection.warnings.join(" ")}` : "提问设置已保存。";
+      feedback.dataset.state = inspection.warnings.length ? "warning" : "success";
+    } catch (error) {
+      feedback.textContent = error.message || "提问设置保存失败。";
+      feedback.dataset.state = "error";
+    }
+  }
+
+  function resetQuestionSettingsInDialog(task) {
+    const source = task.modal?.querySelector(".zai-question-source");
+    const template = task.modal?.querySelector(".zai-question-template");
+    if (!source || !template) return;
+    source.value = "original";
+    template.value = Zotero.AIReaderService.DEFAULT_QUESTION_PROMPT_TEMPLATE;
+    updateQuestionSettingsPreview(task);
+    const feedback = task.modal.querySelector(".zai-question-feedback");
+    feedback.textContent = "已恢复默认，点击“保存提问设置”后生效。";
+    feedback.dataset.state = "";
   }
 
   async function detectRange(task, totalPages) {
@@ -329,6 +482,7 @@ var AIReader = (() => {
         job = Zotero.AIReaderService.retryJob(task.jobId);
         if (!job) throw new Error("原任务不存在，请重新开始");
       } else {
+        await saveDialogModel(task);
         if (!task.lastRequest || (!restart && !task.job)) {
           const totalPages = await waitForTotalPages(task.reader);
           task.lastRequest = {
@@ -428,6 +582,7 @@ var AIReader = (() => {
     if (!modal?.isConnected) return;
     const job = task.job;
     const keySetup = modal.querySelector(".zai-key-setup");
+    const providerSetup = modal.querySelector(".zai-provider-setup");
     const setup = modal.querySelector(".zai-setup");
     const statusBox = modal.querySelector(".zai-status");
     const errorBox = modal.querySelector(".zai-error");
@@ -436,14 +591,16 @@ var AIReader = (() => {
     if (!job) {
       const needsKey = !task.keyStatus?.configured;
       const hasCache = task.cacheStatus === "hit";
+      providerSetup.hidden = false;
       keySetup.hidden = !needsKey;
       setup.hidden = needsKey;
       statusBox.hidden = true;
       errorBox.hidden = !task.setupError;
       errorBox.textContent = task.setupError || "";
       cacheNote.hidden = !hasCache || needsKey;
+      const source = cachedTranslationSource(task);
       cacheNote.textContent = hasCache
-        ? `已缓存 ${task.cacheStats?.translatedPages || 0} 页、${task.cacheStats?.translatedParagraphs || 0} 段译文。重新翻译会发起新的 API 请求。`
+        ? `已缓存 ${task.cacheStats?.translatedPages || 0} 页、${task.cacheStats?.translatedParagraphs || 0} 段译文${source ? `（${source}）` : ""}。重新翻译会发起新的 API 请求。`
         : "";
       const forceAction = hasCache
         ? `<button type="button" class="zai-button zai-button--secondary" data-action="force-start">重新翻译所选页</button>`
@@ -455,6 +612,7 @@ var AIReader = (() => {
     }
 
     keySetup.hidden = true;
+    providerSetup.hidden = true;
     setup.hidden = true;
     cacheNote.hidden = true;
     statusBox.hidden = false;
@@ -485,6 +643,15 @@ var AIReader = (() => {
     renderActions(actions, view.actions);
   }
 
+  function cachedTranslationSource(task) {
+    const paragraphs = Object.values(task.restoredCache?.paragraphs || {});
+    const meta = paragraphs.find((item) => item?.translation_meta)?.translation_meta;
+    if (!meta) return "";
+    const provider = meta.provider && meta.provider !== "unknown" ? meta.provider : "";
+    const model = meta.model && meta.model !== "unknown" ? meta.model : "";
+    return [provider, model].filter(Boolean).join(" · ");
+  }
+
   // Reader 的宿主页面会对普通 button 施加全局样式；每次渲染时确保操作栏
   // 没有残留 hidden 属性，并显式恢复其可见性。
   function renderActions(container, html) {
@@ -498,15 +665,15 @@ var AIReader = (() => {
     const input = task.modal?.querySelector(".zai-api-key");
     const key = input?.value?.trim();
     if (!key) {
-      task.setupError = "请输入 DeepSeek API Key";
+      task.setupError = `请输入 ${task.activeProfile?.name || "当前服务"} API Key`;
       return renderTaskDialog(task);
     }
-    task.setupError = "正在验证 DeepSeek 连接…";
+    task.setupError = `正在验证 ${task.activeProfile?.name || "AI 服务"} 连接…`;
     renderTaskDialog(task);
     try {
-      task.keyStatus = await Zotero.AIReaderService.configureAPIKey(key);
+      task.keyStatus = await Zotero.AIReaderService.configureAPIKey(task.activeProfile?.id, key);
       input.value = "";
-      task.setupError = null;
+      task.setupError = task.keyStatus.warning || null;
     } catch (error) {
       task.setupError = error.message || "API Key 验证失败";
     }
@@ -517,7 +684,7 @@ var AIReader = (() => {
     const running = ["queued", "running"].includes(job.status);
     const phaseName = {
       queued: "等待开始", hashing: "校验 PDF", extracting: "提取页面", translating: "复用缓存",
-      connecting: "连接 DeepSeek", generating: "模型翻译", saving: "保存结果", "cache-hit": "读取本地缓存", done: "完成",
+      connecting: `连接 ${job.provider || "AI 服务"}`, generating: "模型翻译", saving: "保存结果", "cache-hit": "读取本地缓存", done: "完成",
     }[job.phase] || "处理中";
     const elapsed = job.startedAt ? ` · 已用时 ${formatDuration(Date.now() - job.startedAt)}` : "";
     let progress = null;
@@ -635,7 +802,10 @@ var AIReader = (() => {
     const old = overlayStates.get(reader);
     old?.stop?.();
     const paragraphs = Object.values(cache.paragraphs || {}).filter(shouldRenderParagraph);
-    const state = { cache, viewerDoc: null, onScroll: null, timer: null, stopped: false };
+    const state = {
+      cache, itemID: reader._itemID || reader.itemID,
+      viewerDoc: null, onScroll: null, timer: null, stopped: false,
+    };
     const clearViewer = () => {
       if (!state.viewerDoc) return;
       state.viewerDoc.removeEventListener("scroll", state.onScroll, true);
@@ -673,7 +843,7 @@ var AIReader = (() => {
         layer.setAttribute("aria-label", `AI 摘要：${paragraph.summary}`);
         layer.addEventListener("mouseenter", (event) => {
           cancelTooltipClose(viewerDoc);
-          showTooltip(viewerDoc, event, paragraph);
+          showTooltip(viewerDoc, event, paragraph, state.itemID);
         });
         layer.addEventListener("mouseleave", () => scheduleTooltipClose(viewerDoc));
         page.append(layer);
@@ -718,7 +888,7 @@ var AIReader = (() => {
     return !(Number.isFinite(widthRatio) && Number.isFinite(heightRatio) && widthRatio >= 0.65 && heightRatio >= 0.35);
   }
 
-  function showTooltip(doc, event, paragraph) {
+  function showTooltip(doc, event, paragraph, itemID) {
     if (!paragraph.translation) return;
     cancelTooltipClose(doc);
     doc.getElementById("zai-tooltip")?.remove();
@@ -742,16 +912,19 @@ var AIReader = (() => {
     actions.className = "zai-tooltip-actions";
     const copyTranslation = tooltipAction(doc, "复制译文", "复制完整中文译文");
     const formulas = extractObsidianMathMarkdown(paragraph.translation);
-    const copyPrompt = tooltipAction(doc, "复制提问", "复制可直接粘贴到 ChatGPT 的提问");
+    const copyPDF = tooltipAction(doc, "复制整篇 PDF", "将当前 PDF 文件复制到系统剪贴板");
+    const copyPrompt = tooltipAction(doc, "复制提问", "复制提问；可在 AI 翻译 → 齿轮设置中修改提示词");
     const feedback = doc.createElement("div");
     feedback.className = "zai-copy-feedback";
     feedback.setAttribute("role", "status");
     feedback.setAttribute("aria-live", "polite");
     const formulaPicker = formulas.length ? createFormulaPicker(doc, formulas, feedback) : null;
     copyTranslation.addEventListener("click", () => copyFromTooltip(doc, paragraph.translation, copyTranslation, feedback, "已复制完整中文译文。"));
-    copyPrompt.addEventListener("click", () => copyFromTooltip(doc, buildChatGPTPrompt(paragraph.translation), copyPrompt, feedback, "已复制提问，可直接粘贴到 ChatGPT。"));
+    copyPDF.addEventListener("click", () => copyPDFFromTooltip(doc, itemID, copyPDF, feedback));
+    copyPrompt.addEventListener("click", () => copyFromTooltip(doc, buildChatGPTPrompt(paragraph), copyPrompt, feedback, "已复制提问，可直接粘贴到 ChatGPT。"));
     actions.append(copyTranslation);
     if (formulaPicker) actions.append(formulaPicker.toggle);
+    actions.append(copyPDF);
     actions.append(copyPrompt);
     tooltip.addEventListener("mouseenter", () => cancelTooltipClose(doc));
     tooltip.addEventListener("mouseleave", () => scheduleTooltipClose(doc));
@@ -1096,8 +1269,35 @@ var AIReader = (() => {
     flush();
   }
 
-  function buildChatGPTPrompt(translation) {
-    return `${CHATGPT_EXPLANATION_PREFIX}${translation}`;
+  function buildChatGPTPrompt(paragraph, settings = Zotero.AIReaderService.getSettings?.() || {}) {
+    return Zotero.AIReaderService.buildQuestionPrompt(paragraph, settings);
+  }
+
+  async function copyPDFFromTooltip(doc, itemID, button, feedback) {
+    if (button.disabled) return;
+    button.disabled = true;
+    button.setAttribute("aria-busy", "true");
+    feedback.textContent = "正在复制 PDF…";
+    let feedbackDuration = 5000;
+    try {
+      const result = await Zotero.AIReaderService.copyPDFToClipboard(itemID);
+      button.dataset.copied = result.status === "copied" ? "true" : "revealed";
+      if (result.status === "copied") {
+        feedback.textContent = "已复制 PDF。";
+        feedbackDuration = 1800;
+      } else {
+        feedback.textContent = "系统未能直接复制 PDF，已在文件管理器中定位，请手动复制或拖入 ChatGPT。";
+      }
+    } catch (error) {
+      feedback.textContent = error?.message || "无法复制 PDF。";
+    } finally {
+      button.disabled = false;
+      button.removeAttribute("aria-busy");
+      doc.defaultView.setTimeout(() => {
+        button.removeAttribute("data-copied");
+        feedback.textContent = "";
+      }, feedbackDuration);
+    }
   }
 
   async function copyFromTooltip(doc, text, button, feedback, successMessage) {
@@ -1178,7 +1378,7 @@ var AIReader = (() => {
     style.textContent = `
       #zotero-ai-reader-button { box-sizing: border-box; display: inline-flex; flex: 0 0 auto; align-items: center; justify-content: center; gap: 7px; width: auto; min-width: 98px; max-width: none; height: 28px; margin: 0 6px; padding: 0 10px; border: 1px solid color-mix(in srgb, currentColor 14%, transparent); border-radius: 9px; color: CanvasText; background: color-mix(in srgb, CanvasText 4%, transparent); font: 600 12px/1 system-ui; white-space: nowrap; cursor: pointer; transition: background .15s ease, box-shadow .15s ease, border-color .15s ease; }
       #zotero-ai-reader-button:hover { box-shadow: 0 0 0 2px color-mix(in srgb, currentColor 10%, transparent); }
-      #zotero-ai-reader-button:focus-visible, .zai-dialog button:focus-visible, .zai-dialog input:focus-visible { outline: 2px solid #3b82f6; outline-offset: 3px; }
+      #zotero-ai-reader-button:focus-visible, .zai-dialog button:focus-visible, .zai-dialog input:focus-visible, .zai-dialog select:focus-visible { outline: 2px solid #3b82f6; outline-offset: 3px; }
       #zotero-ai-reader-button .zai-toolbar-label { white-space: nowrap; }
       .zai-toolbar-icon { display: inline-grid; place-items: center; flex: 0 0 14px; width: 14px; height: 14px; box-sizing: border-box; }
       .zai-toolbar-icon::before { content: "译"; font-size: 11px; }
@@ -1202,6 +1402,9 @@ var AIReader = (() => {
       .zai-dialog label { display: grid; gap: 7px; font-weight: 600; }
       .zai-key-setup { margin-top: 8px; }
       .zai-key-setup p { margin: 8px 0; }
+      .zai-provider-setup { display: grid; grid-template-columns: 1fr 1.4fr; gap: 10px; margin: 8px 0 14px; }
+      .zai-provider-setup select { box-sizing: border-box; width: 100%; min-height: 38px; padding: 6px 9px; color: CanvasText; background: Canvas; border: 1px solid color-mix(in srgb, CanvasText 20%, transparent); border-radius: var(--zai-radius); }
+      .zai-model-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; }
       .zai-api-key { padding: 8px 10px; border: 1px solid color-mix(in srgb, CanvasText 25%, transparent); border-radius: 6px; font: inherit; }
       .zai-icon-button { display: inline-grid; place-items: center; width: 30px; height: 30px; padding: 0; border: 0; border-radius: 7px; color: color-mix(in srgb, CanvasText 65%, transparent); background: transparent; cursor: pointer; }
       .zai-close { font: 22px/1 system-ui; }
@@ -1215,6 +1418,16 @@ var AIReader = (() => {
       .zai-save-font { min-width: 58px; }
       .zai-font-preview { margin-top: 9px; padding: 7px 9px; border-radius: 6px; background: Canvas; line-height: 1.5; }
       .zai-font-feedback { min-height: 17px; margin-top: 5px; color: #047857; font-size: 11px; }
+      .zai-question-settings { margin-top: 13px; padding-top: 13px; border-top: 1px solid color-mix(in srgb, CanvasText 10%, transparent); }
+      .zai-question-settings label { margin-top: 8px; font-size: 12px; }
+      .zai-question-source { box-sizing: border-box; width: 100%; min-height: 36px; padding: 6px 9px; color: CanvasText; background: Canvas; border: 1px solid color-mix(in srgb, CanvasText 20%, transparent); border-radius: var(--zai-radius); }
+      .zai-question-template { box-sizing: border-box; width: 100%; min-height: 105px; padding: 8px 9px; resize: vertical; color: CanvasText; background: Canvas; border: 1px solid color-mix(in srgb, CanvasText 20%, transparent); border-radius: var(--zai-radius); font: 12px/1.5 ui-monospace, monospace; }
+      .zai-question-help { margin-top: 6px; color: color-mix(in srgb, CanvasText 58%, transparent); font-size: 10px; overflow-wrap: anywhere; }
+      .zai-question-preview { max-height: 120px; overflow: auto; margin: 8px 0 0; padding: 8px; border-radius: 6px; color: color-mix(in srgb, CanvasText 82%, transparent); background: Canvas; font: 11px/1.5 system-ui; white-space: pre-wrap; }
+      .zai-question-actions { display: flex; justify-content: flex-end; gap: 7px; margin-top: 8px; }
+      .zai-question-feedback { min-height: 17px; margin-top: 5px; color: #047857; font-size: 11px; }
+      .zai-question-feedback[data-state="warning"] { color: #b45309; }
+      .zai-question-feedback[data-state="error"] { color: #be123c; }
       .zai-pages { padding: 8px 10px; border: 1px solid color-mix(in srgb, CanvasText 25%, transparent); border-radius: var(--zai-radius); font: inherit; }
       .zai-page-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; align-items: stretch; }
       .zai-detect-range { min-height: 38px; white-space: nowrap; }
@@ -1281,7 +1494,7 @@ var AIReader = (() => {
         .zai-tooltip-translation { color: color-mix(in srgb, CanvasText 86%, transparent); }
       }
       @media (prefers-reduced-motion: reduce) { .zai-status-icon.working::before, #zotero-ai-reader-button .zai-toolbar-icon { animation: none; } }
-      @media (max-width: 520px) { .zai-page-row { grid-template-columns: 1fr; } }
+      @media (max-width: 520px) { .zai-page-row, .zai-provider-setup { grid-template-columns: 1fr; } }
       @media (max-width: 440px) { .zai-dialog { padding: 18px; } .zai-actions > .zai-button--primary { flex: 1 0 100%; order: 3; } .zai-actions > .zai-button--secondary { flex: 1 1 auto; } .zai-dialog-header { gap: 8px; } }
       .zai-paragraph-layer { position: absolute; z-index: 8; box-sizing: border-box; border-left: 2px solid rgba(37,99,235,.5); background: rgba(37,99,235,.025); border-radius: 2px; cursor: help; pointer-events: auto; transition: background .12s ease, outline-color .12s ease; }
       .zai-paragraph-layer:hover { outline: 1px solid rgba(37,99,235,.7); background: rgba(37,99,235,.12); }

@@ -2,17 +2,40 @@
       xmlns:html="http://www.w3.org/1999/xhtml"
       onload="ZoteroAIReaderPrefs.init()">
   <groupbox>
-    <label><html:h2>DeepSeek API</html:h2></label>
-    <description>密钥保存在 Zotero 的加密登录存储中，不会写入插件设置、日志或翻译缓存。</description>
+    <label><html:h2>AI 服务</html:h2></label>
+    <description>可使用内置服务或添加 OpenAI 兼容地址。每个配置的密钥独立保存在 Zotero 加密登录存储中。</description>
     <hbox align="center" class="zai-pref-row">
-      <label value="状态" control="zai-pref-key"/>
+      <label value="配置" control="zai-pref-profile"/>
+      <html:select id="zai-pref-profile" onchange="ZoteroAIReaderPrefs.selectProfile()"/>
+      <button label="设为当前" oncommand="ZoteroAIReaderPrefs.activateProfile()"/>
+      <button label="新建自定义" oncommand="ZoteroAIReaderPrefs.newCustomProfile()"/>
+      <button id="zai-pref-delete-profile" label="删除" oncommand="ZoteroAIReaderPrefs.deleteProfile()"/>
+    </hbox>
+    <html:div class="zai-pref-grid zai-profile-grid">
+      <html:label for="zai-pref-profile-name">名称</html:label>
+      <html:input id="zai-pref-profile-name" type="text"/>
+      <html:label for="zai-pref-base-url">Base URL</html:label>
+      <html:input id="zai-pref-base-url" type="url" spellcheck="false"/>
+      <html:label for="zai-pref-model">模型</html:label>
+      <html:span class="zai-inline-field">
+        <html:input id="zai-pref-model" type="text" list="zai-pref-model-list" spellcheck="false"/>
+        <html:datalist id="zai-pref-model-list"/>
+        <html:button type="button" onclick="ZoteroAIReaderPrefs.loadModels()">加载模型</html:button>
+      </html:span>
+      <html:label for="zai-pref-requires-key">API Key</html:label>
+      <html:label class="zai-checkbox-label"><html:input id="zai-pref-requires-key" type="checkbox" onchange="ZoteroAIReaderPrefs.updateKeyVisibility()"/> 此服务需要 API Key</html:label>
+    </html:div>
+    <hbox align="center" class="zai-pref-row" id="zai-pref-key-row">
+      <label value="密钥状态" control="zai-pref-key"/>
       <html:strong id="zai-pref-key-status">正在检查…</html:strong>
+      <html:input id="zai-pref-key" type="password" placeholder="粘贴新的 API Key" autocomplete="off"/>
+      <button label="验证并保存" oncommand="ZoteroAIReaderPrefs.saveKey()"/>
+      <button label="清除" oncommand="ZoteroAIReaderPrefs.clearKey()"/>
     </hbox>
     <hbox align="center" class="zai-pref-row">
-      <html:input id="zai-pref-key" type="password" placeholder="粘贴新的 DeepSeek API Key" autocomplete="off"/>
-      <button label="验证并保存" oncommand="ZoteroAIReaderPrefs.saveKey()"/>
+      <button label="保存配置" oncommand="ZoteroAIReaderPrefs.saveProfile()"/>
       <button label="测试连接" oncommand="ZoteroAIReaderPrefs.testConnection()"/>
-      <button label="清除" oncommand="ZoteroAIReaderPrefs.clearKey()"/>
+      <description id="zai-pref-active-profile"/>
     </hbox>
     <description id="zai-pref-message" class="zai-pref-message"/>
   </groupbox>
@@ -30,12 +53,36 @@
   </groupbox>
 
   <groupbox>
+    <label><html:h2>提问与复制</html:h2></label>
+    <description>设置“复制提问”的默认段落来源和提示词模板。复制 PDF 只会写入本机剪贴板。</description>
+    <html:div class="zai-pref-grid zai-question-grid">
+      <html:label for="zai-pref-question-source">段落内容</html:label>
+      <html:select id="zai-pref-question-source" onchange="ZoteroAIReaderPrefs.updateQuestionPreview()">
+        <html:option value="original">英文原文（默认）</html:option>
+        <html:option value="translation">中文译文</html:option>
+        <html:option value="bilingual">中英对照</html:option>
+      </html:select>
+      <html:label for="zai-pref-question-template">提问模板</html:label>
+      <html:textarea id="zai-pref-question-template" rows="7" spellcheck="false"
+        oninput="ZoteroAIReaderPrefs.updateQuestionPreview()"/>
+    </html:div>
+    <html:p class="zai-template-help">可用变量：<html:code>{content}</html:code>、<html:code>{original}</html:code>、<html:code>{translation}</html:code>、<html:code>{summary}</html:code>、<html:code>{page}</html:code></html:p>
+    <html:div id="zai-pref-question-warning" class="zai-template-warning" role="status"/>
+    <html:div class="zai-question-preview-wrap">
+      <html:strong>示例预览</html:strong>
+      <html:pre id="zai-pref-question-preview" class="zai-question-preview"/>
+    </html:div>
+    <hbox align="center" class="zai-pref-row">
+      <button label="保存提问设置" oncommand="ZoteroAIReaderPrefs.saveQuestionSettings()"/>
+      <button label="恢复默认" oncommand="ZoteroAIReaderPrefs.restoreQuestionDefaults()"/>
+    </hbox>
+  </groupbox>
+
+  <groupbox>
     <label><html:h2>高级设置</html:h2></label>
     <html:details>
-      <html:summary>模型、批次与重试参数</html:summary>
+      <html:summary>批次与重试参数</html:summary>
       <html:div class="zai-pref-grid">
-        <html:label for="zai-pref-model">模型</html:label>
-        <html:input id="zai-pref-model" type="text"/>
         <html:label for="zai-pref-batch">单批字符数</html:label>
         <html:input id="zai-pref-batch" type="number" min="1000" step="500"/>
         <html:label for="zai-pref-concurrency">并发批次</html:label>

@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { DeepSeekClient, parseModelJson } from "../plugin-src/service.js";
+import { DeepSeekClient, OpenAICompatibleClient, parseModelJson } from "../plugin-src/service.js";
 
 const source = [{ paragraph_id: "p001", page: 1, original: "A short academic paragraph." }];
 const config = () => ({ baseUrl: "https://api.deepseek.com", model: "deepseek-flash", timeoutMs: 1000, retryCount: 2 });
@@ -196,4 +196,63 @@ test("数学协议避免 LaTeX 反斜杠破坏 JSON，并在入库前还原", as
 test("容错解析可修复模型返回的未转义 LaTeX", () => {
   const parsed = parseModelJson('{"results":[{"id":"p1","t":"\\xi_i + \\varepsilon_i","s":"摘要"}]}');
   assert.equal(parsed.results[0].t, "\\xi_i + \\varepsilon_i");
+});
+
+test("通用 OpenAI 兼容请求不发送 DeepSeek 专属参数", async () => {
+  let payload;
+  const client = new OpenAICompatibleClient({
+    keyProvider: async () => "openai-key",
+    configProvider: () => ({ ...config(), profileId: "openai", providerId: "openai", profileName: "OpenAI", requiresApiKey: true }),
+    httpRequest: async (_method, _url, options) => {
+      payload = JSON.parse(options.body);
+      return { status: 200, response: { choices: [{ message: { content: JSON.stringify({
+        results: [{ id: "p001", t: "译文", s: "摘要" }],
+      }) } }] } };
+    },
+  });
+  await client.translate(source);
+  assert.equal(payload.thinking, undefined);
+  assert.deepEqual(payload.response_format, { type: "json_object" });
+});
+
+test("无密钥本地服务不发送 Authorization", async () => {
+  let headers;
+  const client = new OpenAICompatibleClient({
+    keyProvider: async () => "",
+    configProvider: () => ({ ...config(), baseUrl: "http://localhost:11434/v1", profileId: "ollama", providerId: "ollama", profileName: "Ollama", requiresApiKey: false, model: "qwen3:8b" }),
+    httpRequest: async (_method, _url, options) => {
+      headers = options.headers;
+      return { status: 200, response: { choices: [{ message: { content: JSON.stringify({
+        results: [{ id: "p001", t: "译文", s: "摘要" }],
+      }) } }] } };
+    },
+  });
+  await client.translate(source);
+  assert.equal(headers.Authorization, undefined);
+});
+
+test("response_format 不受支持时自动降级一次", async () => {
+  const bodies = [];
+  const client = new OpenAICompatibleClient({
+    keyProvider: async () => "key",
+    configProvider: () => ({ ...config(), profileId: "custom-a", providerId: "custom", profileName: "Custom", requiresApiKey: true }),
+    httpRequest: async (_method, _url, options) => {
+      const body = JSON.parse(options.body); bodies.push(body);
+      if (bodies.length === 1) return { status: 400, response: { error: { message: "unsupported response_format" } } };
+      return { status: 200, response: { choices: [{ message: { content: JSON.stringify({
+        results: [{ id: "p001", t: "译文", s: "摘要" }],
+      }) } }] } };
+    },
+  });
+  await client.translate(source);
+  assert.deepEqual(bodies[0].response_format, { type: "json_object" });
+  assert.equal(bodies[1].response_format, undefined);
+});
+
+test("模型列表兼容 data 数组并去重排序", async () => {
+  const client = new OpenAICompatibleClient({
+    keyProvider: async () => "key", configProvider: config,
+    httpRequest: async () => ({ status: 200, response: { data: [{ id: "z-model" }, { id: "a-model" }, { id: "a-model" }] } }),
+  });
+  assert.deepEqual(await client.listModels(config(), "key"), ["a-model", "z-model"]);
 });

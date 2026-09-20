@@ -5,7 +5,11 @@ import vm from "node:vm";
 
 async function loadUIHelpers() {
   const source = await fs.readFile(new URL("../plugin/content/ai-reader.js", import.meta.url), "utf8");
-  const context = { result: null };
+  const context = {
+    result: null,
+    Zotero: { AIReaderService: { buildQuestionPrompt: (paragraph, options) =>
+      options.questionPromptTemplate.replace("{content}", paragraph.original) } },
+  };
   vm.createContext(context);
   vm.runInContext(`${source}\nresult = AIReader._test;`, context);
   return context.result;
@@ -76,11 +80,12 @@ test("相同状态轮询不重建操作按钮，保留键盘焦点", async () =>
   assert.equal(writes, 1);
 });
 
-test("复制提问包含固定说明和完整译文", async () => {
+test("复制提问使用完整段落和当前自定义设置", async () => {
   const { buildChatGPTPrompt } = await loadUIHelpers();
+  const settings = { questionContentSource: "original", questionPromptTemplate: "解释：{content}" };
   assert.equal(
-    buildChatGPTPrompt("视觉基础模型可以泛化。"),
-    "请用通俗中文解释以下论文译文，并说明关键术语：\n\n视觉基础模型可以泛化。",
+    buildChatGPTPrompt({ original: "Vision foundation models generalize.", translation: "视觉基础模型可以泛化。" }, settings),
+    "解释：Vision foundation models generalize.",
   );
 });
 
@@ -155,6 +160,10 @@ test("译文浮层样式允许选择、交互和自定义字号", async () => {
   assert.match(source, /选择公式（\$\{formulas\.length\}）/);
   assert.match(source, /复制选中公式（\$\{state\.count\}）/);
   assert.match(source, /复制提问/);
+  assert.match(source, /复制整篇 PDF/);
+  assert.match(source, /copyPDFToClipboard\(itemID\)/);
+  assert.match(source, /feedback\.textContent = "已复制 PDF。"/);
+  assert.doesNotMatch(source, /已复制 PDF，请先到 ChatGPT/);
   assert.match(source, /copySelected\.disabled = true/);
   assert.match(source, /aria-expanded", "false/);
   assert.match(source, /zai-formula-option/);
@@ -163,6 +172,19 @@ test("译文浮层样式允许选择、交互和自定义字号", async () => {
   assert.match(source, /renderMathText\(doc, translation, paragraph\.translation\)/);
   assert.doesNotMatch(source, /layer\.addEventListener\("mousemove"/);
   assert.match(source, /tooltip\.addEventListener\("wheel"/);
+});
+
+test("AI 翻译齿轮提供提问模板编辑、预览、保存和恢复默认", async () => {
+  const source = await fs.readFile(new URL("../plugin/content/ai-reader.js", import.meta.url), "utf8");
+  assert.match(source, /aria-label="阅读与提问设置"/);
+  assert.match(source, /class="zai-question-source"/);
+  assert.match(source, /class="zai-question-template"/);
+  assert.match(source, /class="zai-question-preview"/);
+  assert.match(source, /data-action="save-question"/);
+  assert.match(source, /data-action="reset-question"/);
+  assert.match(source, /saveSettings\(\{ \.\.\.Zotero\.AIReaderService\.getSettings\(\), \.\.\.input \}\)/);
+  assert.match(source, /DEFAULT_QUESTION_PROMPT_TEMPLATE/);
+  assert.match(source, /AI 翻译 → 齿轮设置中修改提示词/);
 });
 
 test("公式渲染保留普通文本并支持嵌套上下标、分式和根号", async () => {
@@ -280,6 +302,15 @@ test("翻译弹窗提供可收起的译文字号设置", async () => {
   assert.match(source, /data-action="save-font"/);
   assert.match(source, /译文字号预览/);
   assert.match(source, /zai-button--secondary zai-button--compact/);
+});
+
+test("翻译弹窗支持快速切换 AI 服务和模型", async () => {
+  const source = await fs.readFile(new URL("../plugin/content/ai-reader.js", import.meta.url), "utf8");
+  assert.match(source, /class="zai-profile-select"/);
+  assert.match(source, /class="zai-model-input"/);
+  assert.match(source, /data-action="load-models"/);
+  assert.match(source, /setActiveProfile\(profileId\)/);
+  assert.match(source, /cachedTranslationSource/);
 });
 
 test("Reader 打开后自动检查缓存并持续等待 PDF 页面挂载", async () => {

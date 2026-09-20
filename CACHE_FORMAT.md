@@ -50,6 +50,7 @@ Zotero AI Reader 0.6.0 起使用稳定的 v2 缓存。缓存属于用户数据�
               "summary": "…",
               "processing_status": "completed",
               "prompt_version": "…",
+              "provider": "DeepSeek",
               "model": "…",
               "created_at": "…",
               "operation_id": "…"
@@ -62,7 +63,7 @@ Zotero AI Reader 0.6.0 起使用稳定的 v2 缓存。缓存属于用户数据�
 }
 ```
 
-页面位置与译文分开保存。重新提取 PDF 时可以更新 bbox，而已生成的译文仍按 `paragraph_hash` 复用。提示词和模型版本只记录来源，不参与有效性判断。
+页面位置与译文分开保存。重新提取 PDF 时可以更新 bbox，而已生成的译文仍按 `paragraph_hash` 复用。服务商、模型和提示词版本只记录来源，不参与有效性判断；旧修订缺少 `provider` 时按 `unknown` 读取。
 
 ## 长期兼容规则
 

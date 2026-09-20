@@ -12,11 +12,99 @@ const PLUGIN_ID = "zotero-ai-reader@local";
 // 使用真实 HTTPS Origin，兼容 Zotero 10/Firefox 的新密码存储后端。
 const SECRET_ORIGIN = "https://api.deepseek.com";
 const SECRET_REALM = "DeepSeek API Key";
+const PROFILE_SECRET_ORIGIN = "https://zotero-ai-reader.local";
+const PROFILE_SECRET_REALM = "Zotero AI Reader API Key";
 const PREF_PREFIX = "extensions.zotero-ai-reader.";
+
+export const DEFAULT_QUESTION_PROMPT_TEMPLATE =
+  "请用通俗中文解释以下论文段落，并说明关键术语、核心逻辑以及它在全文中的作用：\n\n{content}";
+export const QUESTION_CONTENT_SOURCES = Object.freeze(["original", "translation", "bilingual"]);
+const QUESTION_TEMPLATE_VARIABLES = Object.freeze(["content", "original", "translation", "summary", "page"]);
+const CLIPBOARD_TEMP_MAX_AGE_MS = 24 * 60 * 60 * 1000;
+const GENERIC_PDF_NAMES = /^(?:full[\s_-]*text|document|paper|attachment|download|file|pdf)(?:[\s_-]*\d+)?$/i;
+const UUID_FILE_NAME = /^[{(]?[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}[)}]?$/i;
+
+export const PROVIDER_PRESETS = Object.freeze([
+  Object.freeze({ id: "deepseek", name: "DeepSeek", baseUrl: "https://api.deepseek.com", model: "deepseek-flash", requiresApiKey: true, builtin: true }),
+  Object.freeze({ id: "openai", name: "OpenAI", baseUrl: "https://api.openai.com/v1", model: "", requiresApiKey: true, builtin: true }),
+  Object.freeze({ id: "openrouter", name: "OpenRouter", baseUrl: "https://openrouter.ai/api/v1", model: "", requiresApiKey: true, builtin: true }),
+  Object.freeze({ id: "siliconflow", name: "硅基流动", baseUrl: "https://api.siliconflow.cn/v1", model: "", requiresApiKey: true, builtin: true }),
+  Object.freeze({ id: "ollama", name: "Ollama", baseUrl: "http://localhost:11434/v1", model: "", requiresApiKey: false, builtin: true }),
+]);
+
+function isPrivateHttpHost(hostname) {
+  const host = String(hostname || "").toLowerCase().replace(/^\[|\]$/g, "");
+  if (host === "localhost" || host.endsWith(".local") || host === "::1") return true;
+  if (/^127\./.test(host) || /^169\.254\./.test(host)) return true;
+  const ipv4 = host.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
+  if (ipv4) {
+    const parts = ipv4.slice(1).map(Number);
+    if (parts.some((part) => part > 255)) return false;
+    return parts[0] === 10 || parts[0] === 127 ||
+      (parts[0] === 172 && parts[1] >= 16 && parts[1] <= 31) ||
+      (parts[0] === 192 && parts[1] === 168) ||
+      (parts[0] === 169 && parts[1] === 254);
+  }
+  return /^f[cd][0-9a-f]{2}:/i.test(host) || /^fe[89ab][0-9a-f]:/i.test(host);
+}
+
+export function normalizeBaseUrl(value) {
+  const raw = String(value || "").trim();
+  if (!raw) throw new Error("请填写 API Base URL");
+  let parsed;
+  try { parsed = new URL(raw); } catch { throw new Error("API Base URL 格式无效"); }
+  if (!['https:', 'http:'].includes(parsed.protocol)) throw new Error("API Base URL 仅支持 HTTP 或 HTTPS");
+  if (parsed.username || parsed.password) throw new Error("API Base URL 不能包含用户名或密码");
+  if (parsed.search || parsed.hash) throw new Error("API Base URL 不能包含查询参数或片段");
+  if (parsed.protocol === "http:" && !isPrivateHttpHost(parsed.hostname)) {
+    throw new Error("公网 API 必须使用 HTTPS；HTTP 仅允许本机或局域网地址");
+  }
+  parsed.pathname = parsed.pathname.replace(/\/+$/, "") || "";
+  return parsed.toString().replace(/\/$/, "");
+}
+
+function endpoint(baseUrl, path) {
+  return `${normalizeBaseUrl(baseUrl)}/${String(path).replace(/^\/+/, "")}`;
+}
 
 export function normalizeTranslationFontSize(value) {
   const number = Number(value);
   return Number.isFinite(number) && number >= 12 && number <= 22 ? Math.round(number) : 16;
+}
+
+export function normalizeQuestionContentSource(value) {
+  return QUESTION_CONTENT_SOURCES.includes(value) ? value : "original";
+}
+
+export function inspectQuestionPromptTemplate(value) {
+  const template = String(value ?? "");
+  if (!template.trim()) throw new Error("提问模板不能为空");
+  const variables = [...template.matchAll(/\{([a-zA-Z][\w-]*)\}/g)].map((match) => match[1]);
+  const unknownVariables = [...new Set(variables.filter((name) => !QUESTION_TEMPLATE_VARIABLES.includes(name)))];
+  const hasParagraphVariable = variables.some((name) => QUESTION_TEMPLATE_VARIABLES.includes(name));
+  const warnings = [];
+  if (!hasParagraphVariable) warnings.push("模板不包含段落变量，复制时不会带入当前论文内容。");
+  if (unknownVariables.length) warnings.push(`未知变量将保持原样：${unknownVariables.map((name) => `{${name}}`).join("、")}`);
+  return { template, variables, unknownVariables, hasParagraphVariable, warnings };
+}
+
+export function buildQuestionPrompt(paragraph, options = {}) {
+  const original = String(paragraph?.original || "").trim();
+  const translation = String(paragraph?.translation || "").trim();
+  const summary = String(paragraph?.summary || "").trim();
+  const page = paragraph?.page === undefined || paragraph?.page === null ? "" : String(paragraph.page);
+  const source = normalizeQuestionContentSource(options.questionContentSource);
+  let content;
+  if (source === "translation") content = translation || original;
+  else if (source === "bilingual") {
+    content = [original && `英文原文：\n${original}`, translation && `中文译文：\n${translation}`]
+      .filter(Boolean).join("\n\n");
+  } else content = original || translation;
+  const template = inspectQuestionPromptTemplate(
+    options.questionPromptTemplate ?? DEFAULT_QUESTION_PROMPT_TEMPLATE,
+  ).template;
+  const replacements = { content, original, translation, summary, page };
+  return template.replace(/\{(content|original|translation|summary|page)\}/g, (_match, name) => replacements[name]);
 }
 const PROMPT_VERSION = "zh-academic-v6-safe-math-protocol";
 const TARGET_LANGUAGE = "zh-CN";
@@ -162,7 +250,15 @@ export class SecretStore {
     this.createLoginInfo = createLoginInfo;
   }
 
-  async find() {
+  async find(profileId = "deepseek") {
+    const matches = await this.logins.searchLoginsAsync({
+      origin: PROFILE_SECRET_ORIGIN,
+      httpRealm: PROFILE_SECRET_REALM,
+    });
+    return matches.find((login) => login.username === `${PLUGIN_ID}:${profileId}`) || null;
+  }
+
+  async findLegacy() {
     const matches = await this.logins.searchLoginsAsync({
       origin: SECRET_ORIGIN,
       httpRealm: SECRET_REALM,
@@ -170,53 +266,97 @@ export class SecretStore {
     return matches.find((login) => login.username === PLUGIN_ID) || null;
   }
 
-  async get() {
-    return (await this.find())?.password || "";
+  async get(profileId = "deepseek") {
+    return (await this.find(profileId))?.password || "";
   }
 
-  async status() {
-    const key = await this.get();
+  async status(profileId = "deepseek") {
+    const key = await this.get(profileId);
     return { configured: Boolean(key), masked: key ? `••••${key.slice(-4)}` : "" };
   }
 
-  async set(key) {
+  async set(key, profileId = "deepseek") {
     const value = String(key || "").trim();
-    if (!value) throw new Error("请输入 DeepSeek API Key");
-    const existing = await this.find();
-    const replacement = this.createLoginInfo(SECRET_ORIGIN, null, SECRET_REALM, PLUGIN_ID, value, "", "");
+    if (!value) throw new Error("请输入 API Key");
+    const existing = await this.find(profileId);
+    const replacement = this.createLoginInfo(
+      PROFILE_SECRET_ORIGIN, null, PROFILE_SECRET_REALM, `${PLUGIN_ID}:${profileId}`, value, "", "",
+    );
     if (existing) await this.logins.modifyLoginAsync(existing, replacement);
     else await this.logins.addLoginAsync(replacement);
-    return this.status();
+    return this.status(profileId);
   }
 
-  async clear() {
-    const existing = await this.find();
+  async clear(profileId = "deepseek") {
+    const existing = await this.find(profileId);
     if (existing) await this.logins.removeLoginAsync(existing);
     return { configured: false, masked: "" };
   }
+
+  async migrateLegacyDeepSeek() {
+    if (await this.find("deepseek")) return false;
+    const legacy = await this.findLegacy();
+    if (!legacy?.password) return false;
+    await this.set(legacy.password, "deepseek");
+    return true;
+  }
 }
 
-export class DeepSeekClient {
+function providerLabel(config) {
+  return String(config?.profileName || config?.name || "AI 服务");
+}
+
+function completeClientConfig(config) {
+  const input = config || {};
+  const deepseek = /(^|\.)deepseek\.com$/i.test(new URL(normalizeBaseUrl(input.baseUrl)).hostname);
+  return {
+    ...input,
+    profileId: input.profileId || (deepseek ? "deepseek" : "custom"),
+    providerId: input.providerId || (deepseek ? "deepseek" : "custom"),
+    profileName: input.profileName || (deepseek ? "DeepSeek" : "AI 服务"),
+    requiresApiKey: input.requiresApiKey !== false,
+  };
+}
+
+function unsupportedResponseFormat(error) {
+  const message = error?.message || "";
+  return errorStatus(error) === 400 && (
+    /(response[_ ]?format|json[_ ]?object).*(unsupported|unknown|not supported|invalid)/i.test(message) ||
+    /(unsupported|unknown|not supported|invalid).*(response[_ ]?format|json[_ ]?object)/i.test(message)
+  );
+}
+
+export class OpenAICompatibleClient {
   constructor({ keyProvider, configProvider, httpRequest }) {
     this.keyProvider = keyProvider;
     this.configProvider = configProvider;
     this.httpRequest = httpRequest;
   }
 
-  async testKey(key) {
-    const config = this.configProvider();
-    await this.call("GET", `${config.baseUrl}/models`, { key, timeout: 15_000 });
+  async listModels(config = this.configProvider(), key = "") {
+    config = completeClientConfig(config);
+    const response = await this.call("GET", endpoint(config.baseUrl, "models"), {
+      key, timeout: 15_000, providerName: providerLabel(config),
+    });
+    const data = response.payload?.data ?? response.payload?.models;
+    if (!Array.isArray(data)) throw new Error(`${providerLabel(config)} /models 响应缺少模型列表`);
+    return [...new Set(data.map((item) => typeof item === "string" ? item : item?.id).filter(Boolean))].sort();
+  }
+
+  async testKey(key, config = this.configProvider()) {
+    await this.listModels(config, key);
     return true;
   }
 
-  async translate(paragraphs, { signal, onEvent, batchIndex = null } = {}) {
-    const key = await this.keyProvider();
-    if (!key) {
-      const error = new Error("尚未配置 DeepSeek API Key，请先在插件设置中填写");
+  async translate(paragraphs, { signal, onEvent, batchIndex = null, config: suppliedConfig } = {}) {
+    const config = completeClientConfig(suppliedConfig || this.configProvider());
+    const key = await this.keyProvider(config.profileId);
+    if (config.requiresApiKey && !key) {
+      const error = new Error(`尚未配置 ${providerLabel(config)} API Key，请先在插件设置中填写`);
       error.code = "AUTH_REQUIRED";
       throw error;
     }
-    const config = this.configProvider();
+    if (!String(config.model || "").trim()) throw new Error(`请先为 ${providerLabel(config)} 选择或填写模型 ID`);
     // 只保留请求所需字段，防止并发任务或缓存写入改变已准备的批次。
     const snapshot = Object.freeze(paragraphs.map((paragraph) => Object.freeze({ ...paragraph })));
     const completed = new Map();
@@ -240,33 +380,46 @@ export class DeepSeekClient {
       });
       try {
         onEvent?.({ type: "request.started", audit });
-        const response = await this.call("POST", `${config.baseUrl}/chat/completions`, {
-          key,
-          timeout: config.timeoutMs,
-          signal,
-          body: {
-            model: config.model,
-            messages: [
-              { role: "system", content: "你是严谨的学术论文翻译器。必须只输出有效 JSON，不要输出 Markdown。" },
-              { role: "user", content: prompt },
-            ],
-            thinking: { type: "disabled" },
-            temperature: 0.2,
-            max_tokens: 8192,
-            stream: false,
-            response_format: { type: "json_object" },
-          },
-        });
+        let responseAudit = audit;
+        const body = {
+          model: config.model,
+          messages: [
+            { role: "system", content: "你是严谨的学术论文翻译器。必须只输出有效 JSON，不要输出 Markdown。" },
+            { role: "user", content: prompt },
+          ],
+          temperature: 0.2,
+          max_tokens: 8192,
+          stream: false,
+          response_format: { type: "json_object" },
+          ...(config.providerId === "deepseek" ? { thinking: { type: "disabled" } } : {}),
+        };
+        let response;
+        try {
+          response = await this.call("POST", endpoint(config.baseUrl, "chat/completions"), {
+            key, timeout: config.timeoutMs, signal, body, providerName: providerLabel(config),
+          });
+        } catch (error) {
+          if (!unsupportedResponseFormat(error)) throw error;
+          delete body.response_format;
+          onEvent?.({ type: "request.retrying", attempt: 1, reason: "unsupported_response_format", audit });
+          responseAudit = Object.freeze({
+            ...audit, requestIndex: ++requestIndex, isRetry: true, retryReason: "unsupported_response_format",
+          });
+          onEvent?.({ type: "request.started", audit: responseAudit });
+          response = await this.call("POST", endpoint(config.baseUrl, "chat/completions"), {
+            key, timeout: config.timeoutMs, signal, body, providerName: providerLabel(config),
+          });
+        }
         const payload = response.payload;
         const choice = payload?.choices?.[0];
         onEvent?.({
           type: "response.received",
           usage: normalizeUsage(payload?.usage),
           finishReason: choice?.finish_reason || null,
-          audit,
+          audit: responseAudit,
         });
         const content = choice?.message?.content;
-        if (typeof content !== "string" || !content.trim()) throw new Error("DeepSeek 响应缺少 choices[0].message.content");
+        if (typeof content !== "string" || !content.trim()) throw new Error(`${providerLabel(config)} 响应缺少 choices[0].message.content`);
         let parsed;
         try {
           parsed = parseModelJson(content);
@@ -277,7 +430,7 @@ export class DeepSeekClient {
             onEvent?.({ type: "request.retrying", attempt: fullRepairCount, reason: retryReason, audit });
             continue;
           }
-          const error = new Error("DeepSeek 返回的内容不是有效 JSON，完整修复重试仍失败");
+          const error = new Error(`${providerLabel(config)} 返回的内容不是有效 JSON，完整修复重试仍失败`);
           error.code = "INVALID_MODEL_OUTPUT";
           throw error;
         }
@@ -298,7 +451,7 @@ export class DeepSeekClient {
             onEvent?.({ type: "request.retrying", attempt: fullRepairCount, reason: retryReason, audit });
             continue;
           }
-          const outputError = new Error(`DeepSeek 返回的 JSON 结构不符合预期（${getJsonShape(parsed)}）；应包含 results 数组`);
+          const outputError = new Error(`${providerLabel(config)} 返回的 JSON 结构不符合预期（${getJsonShape(parsed)}）；应包含 results 数组`);
           outputError.code = "INVALID_MODEL_OUTPUT";
           throw outputError;
         }
@@ -306,7 +459,7 @@ export class DeepSeekClient {
       } catch (error) {
         if (signal?.aborted) throw new Error("任务已取消");
         if (errorStatus(error) === 401 || errorStatus(error) === 403) {
-          const authError = new Error("DeepSeek API Key 无效或无权限，请在插件设置中重新配置");
+          const authError = new Error(`${providerLabel(config)} API Key 无效或无权限，请在插件设置中重新配置`);
           authError.code = "AUTH_INVALID";
           throw authError;
         }
@@ -319,14 +472,14 @@ export class DeepSeekClient {
     }
   }
 
-  async call(method, url, { key, body, timeout, signal } = {}) {
+  async call(method, url, { key, body, timeout, signal, providerName = "AI 服务" } = {}) {
     let requestHandle = null;
     const onAbort = () => requestHandle?.abort?.();
     signal?.addEventListener("abort", onAbort, { once: true });
     try {
       const response = await this.httpRequest(method, url, {
         headers: {
-          Authorization: `Bearer ${key}`,
+          ...(key ? { Authorization: `Bearer ${key}` } : {}),
           ...(body ? { "Content-Type": "application/json" } : {}),
         },
         body: body ? JSON.stringify(body) : undefined,
@@ -342,7 +495,7 @@ export class DeepSeekClient {
         response?.responseText ? JSON.parse(response.responseText) : {}
       );
       if (status < 200 || status >= 300) {
-        const error = new Error(`DeepSeek HTTP ${status}: ${errorDetail(payload)}`);
+        const error = new Error(`${providerName} HTTP ${status}: ${errorDetail(payload)}`);
         error.status = status;
         throw error;
       }
@@ -355,6 +508,9 @@ export class DeepSeekClient {
     }
   }
 }
+
+// 保留旧导出名，避免现有外部测试或集成立即失效。
+export const DeepSeekClient = OpenAICompatibleClient;
 
 function safeName(value) {
   return String(value || "unknown").replace(/[^A-Za-z0-9._-]/g, "_").slice(0, 80);
@@ -415,6 +571,7 @@ function materializeCache(document, language = TARGET_LANGUAGE) {
         cache_revision_id: revision.id,
         translation_meta: {
           prompt_version: revision.prompt_version,
+          provider: revision.provider || "unknown",
           model: revision.model,
           created_at: revision.created_at,
         },
@@ -669,6 +826,7 @@ export class CacheStore {
               summary: paragraph.summary || "",
               processing_status: "completed",
               prompt_version: PROMPT_VERSION,
+              provider: documentData.provider || "unknown",
               model: documentData.model || "unknown",
               created_at: timestamp,
               operation_id: documentData.operation_id || null,
@@ -742,7 +900,7 @@ export class JobManager {
   }
 
   publicJob(job) {
-    const { controller, request, ...fields } = job;
+    const { controller, request, config, ...fields } = job;
     return fields;
   }
 
@@ -753,14 +911,15 @@ export class JobManager {
 
   createJob(request) {
     const now = Date.now();
+    const config = Object.freeze({ ...this.configProvider() });
     const job = {
-      id: this.uuid(), request, status: "queued", phase: "queued",
+      id: this.uuid(), request, config, status: "queued", phase: "queued",
       pageCurrent: 0, pageTotal: request.pages.length,
       prepareProgress: 0,
       paragraphCurrent: 0, paragraphTotal: 0, batchCurrent: 0, batchTotal: 0, batchActive: 0,
       paragraphTranslated: 0, paragraphCached: 0, paragraphSkipped: 0, paragraphFailed: 0,
       localCacheHits: 0,
-      provider: "deepseek", model: this.configProvider().model,
+      provider: config.profileName, profileId: config.profileId, model: config.model,
       modelCallCount: 0, apiRequestCount: 0, failed: [], result: null,
       tokenUsage: emptyTokenUsage(), retryTokenUsage: emptyTokenUsage(), requestAudits: [],
       controller: createAbortController(),
@@ -797,7 +956,7 @@ export class JobManager {
 
   async run(job) {
     const { itemID, itemKey, sourceHash, pages, forceRetranslate = false, forceParagraphIds = null } = job.request;
-    const config = this.configProvider();
+    const config = job.config;
     job.status = "running";
     job.startedAt = Date.now();
     job.phase = "hashing";
@@ -859,6 +1018,7 @@ export class JobManager {
         layout_paragraphs: extracted.paragraphs,
         paragraphs: paragraphMap,
         force_retranslate: forceRetranslate,
+        provider: config.profileName,
         model: config.model,
         operation_id: job.id,
       };
@@ -880,6 +1040,7 @@ export class JobManager {
       touch(job);
       try {
         const translated = await this.translator.translate(batch, {
+          config,
           signal: job.controller.signal,
           batchIndex: batchIndex + 1,
           onEvent: (event) => {
@@ -919,6 +1080,7 @@ export class JobManager {
             job.modelCallCount += 1;
             try {
               const [translated] = await this.translator.translate([paragraph], {
+                config,
                 signal: job.controller.signal,
                 batchIndex: batchIndex + 1,
                 onEvent: (event) => {
@@ -972,23 +1134,69 @@ function createLoginInfo(...args) {
   return new LoginInfo(...args);
 }
 
-function configFromPrefs() {
-  const get = (name, fallback) => {
+function getPref(name, fallback) {
+  try {
+    const value = Zotero.Prefs.get(`${PREF_PREFIX}${name}`, true);
+    return value === undefined || value === null || value === "" ? fallback : value;
+  } catch { return fallback; }
+}
+
+function setPref(name, value) {
+  Zotero.Prefs.set(`${PREF_PREFIX}${name}`, value, true);
+}
+
+function profileRecords() {
+  let saved = [];
+  try {
+    const parsed = JSON.parse(String(getPref("profiles", "[]")));
+    if (Array.isArray(parsed)) saved = parsed;
+  } catch { /* 损坏的偏好设置回退为内置档案。 */ }
+  const byId = new Map(saved.filter((item) => item && typeof item.id === "string").map((item) => [item.id, item]));
+  const profiles = PROVIDER_PRESETS.map((preset) => {
+    const override = byId.get(preset.id) || {};
+    const legacyModel = preset.id === "deepseek" ? String(getPref("model", preset.model)) : preset.model;
+    return { ...preset, model: String(override.model ?? legacyModel) };
+  });
+  for (const item of saved) {
+    if (!item || item.builtin || PROVIDER_PRESETS.some((preset) => preset.id === item.id)) continue;
     try {
-      const value = Zotero.Prefs.get(`${PREF_PREFIX}${name}`, true);
-      return value === undefined || value === null || value === "" ? fallback : value;
-    } catch {
-      return fallback;
-    }
-  };
+      profiles.push({
+        id: String(item.id), name: String(item.name || "自定义服务"),
+        baseUrl: normalizeBaseUrl(item.baseUrl), model: String(item.model || ""),
+        requiresApiKey: item.requiresApiKey !== false, builtin: false,
+      });
+    } catch { /* 忽略无法使用的旧记录。 */ }
+  }
+  return profiles;
+}
+
+function persistProfiles(profiles) {
+  const records = profiles.map(({ id, name, baseUrl, model, requiresApiKey, builtin }) => ({
+    id, name, baseUrl, model, requiresApiKey, builtin: Boolean(builtin),
+  }));
+  setPref("profiles", JSON.stringify(records));
+}
+
+function activeProfileId(profiles = profileRecords()) {
+  const requested = String(getPref("activeProfileId", "deepseek"));
+  return profiles.some((profile) => profile.id === requested) ? requested : "deepseek";
+}
+
+function configFromPrefs(profileId = null) {
+  const profiles = profileRecords();
+  const id = profileId || activeProfileId(profiles);
+  const profile = profiles.find((item) => item.id === id) || profiles[0];
   return {
-    baseUrl: "https://api.deepseek.com",
-    model: String(get("model", "deepseek-flash")),
-    timeoutMs: Math.max(10_000, Number(get("timeoutMs", 90_000))),
-    retryCount: Math.max(0, Number(get("retryCount", 2))),
-    maxBatchChars: Math.max(1000, Number(get("maxBatchChars", 7000))),
-    concurrency: Math.max(1, Math.min(4, Number(get("concurrency", 2)))),
-    translationFontSize: normalizeTranslationFontSize(get("translationFontSize", 16)),
+    profileId: profile.id, providerId: profile.builtin ? profile.id : "custom",
+    profileName: profile.name, baseUrl: profile.baseUrl, model: profile.model,
+    requiresApiKey: profile.requiresApiKey,
+    timeoutMs: Math.max(10_000, Number(getPref("timeoutMs", 90_000))),
+    retryCount: Math.max(0, Number(getPref("retryCount", 2))),
+    maxBatchChars: Math.max(1000, Number(getPref("maxBatchChars", 7000))),
+    concurrency: Math.max(1, Math.min(4, Number(getPref("concurrency", 2)))),
+    translationFontSize: normalizeTranslationFontSize(getPref("translationFontSize", 16)),
+    questionContentSource: normalizeQuestionContentSource(getPref("questionContentSource", "original")),
+    questionPromptTemplate: String(getPref("questionPromptTemplate", DEFAULT_QUESTION_PROMPT_TEMPLATE)),
   };
 }
 
@@ -999,11 +1207,14 @@ function requireRuntime() {
 
 export async function init() {
   if (runtime) return;
+  cleanupClipboardPDFTemp({ io: IOUtils, tempRoot: clipboardTempRoot() })
+    .catch((error) => Zotero.logError(error));
   const cacheDir = PathUtils.join(Zotero.DataDirectory.dir, "ai-reader-cache");
   const secrets = new SecretStore({ logins: Services.logins, createLoginInfo });
+  await secrets.migrateLegacyDeepSeek();
   const cache = new CacheStore({ cacheDir, io: IOUtils, path: PathUtils });
-  const translator = new DeepSeekClient({
-    keyProvider: () => secrets.get(),
+  const translator = new OpenAICompatibleClient({
+    keyProvider: (profileId) => secrets.get(profileId),
     configProvider: configFromPrefs,
     httpRequest: (...args) => Zotero.HTTP.request(...args),
   });
@@ -1031,6 +1242,166 @@ async function attachmentIdentity(itemID) {
   const sourceHash = await item.attachmentHash;
   if (!sourceHash) throw new Error("无法读取 PDF 附件哈希");
   return { item, itemKey: item.key, sourceHash };
+}
+
+function localFileFromPath(path) {
+  const file = Components.classes["@mozilla.org/file/local;1"].createInstance(Ci.nsIFile);
+  file.initWithPath(path);
+  return file;
+}
+
+function leafNameFromPath(path) {
+  return String(path || "").split(/[\\/]/).pop() || "";
+}
+
+export function sanitizeClipboardPDFName(value) {
+  let base = String(value || "")
+    .replace(/\.pdf$/i, "")
+    .replace(/[\u0000-\u001f\u007f\u202a-\u202e\u2066-\u2069]/g, "")
+    .replace(/[<>:"/\\|?*]/g, " ")
+    .replace(/\s+/g, " ")
+    .replace(/[. ]+$/g, "")
+    .trim();
+  if (/^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])$/i.test(base)) base = `_${base}`;
+  base = [...base].slice(0, 120).join("").replace(/[. ]+$/g, "").trim();
+  return `${base || "paper"}.pdf`;
+}
+
+export function isOpaquePDFFilename(value) {
+  const base = String(value || "").replace(/\.pdf$/i, "").trim();
+  return !base || UUID_FILE_NAME.test(base) || /^[0-9a-f]{20,}$/i.test(base) || GENERIC_PDF_NAMES.test(base);
+}
+
+export function chooseClipboardPDFName(item, sourcePath) {
+  const attachmentName = String(item?.attachmentFilename || leafNameFromPath(sourcePath));
+  if (!isOpaquePDFFilename(attachmentName)) return sanitizeClipboardPDFName(attachmentName);
+  const parentTitle = String(item?.parentItem?.getField?.("title") || "").trim();
+  const attachmentTitle = String(item?.getField?.("title") || "").trim();
+  const title = parentTitle || (!isOpaquePDFFilename(attachmentTitle) ? attachmentTitle : "") || attachmentName;
+  return sanitizeClipboardPDFName(title);
+}
+
+export async function prepareClipboardPDF(sourcePath, desiredFileName, {
+  io = globalThis.IOUtils,
+  path = globalThis.PathUtils,
+  tempRoot,
+  uuid = () => String(Date.now()),
+} = {}) {
+  const sourceName = leafNameFromPath(sourcePath);
+  const fileName = sanitizeClipboardPDFName(desiredFileName);
+  if (sourceName === fileName) return { path: sourcePath, fileName, temporary: false };
+  if (!io?.makeDirectory || !io?.copy || !path?.join || !tempRoot) {
+    throw new Error("当前环境无法生成可读文件名的 PDF 副本");
+  }
+  const directory = path.join(tempRoot, String(uuid()).replace(/[{}]/g, ""));
+  const destination = path.join(directory, fileName);
+  await io.makeDirectory(directory, { createAncestors: true, ignoreExisting: true });
+  await io.copy(sourcePath, destination);
+  return { path: destination, fileName, temporary: true, directory };
+}
+
+export async function cleanupClipboardPDFTemp({
+  io = globalThis.IOUtils,
+  tempRoot,
+  now = Date.now(),
+  maxAgeMs = CLIPBOARD_TEMP_MAX_AGE_MS,
+} = {}) {
+  if (!tempRoot || !io?.getChildren || !io?.stat || !io?.remove) return 0;
+  let children;
+  try { children = await io.getChildren(tempRoot); } catch { return 0; }
+  let removed = 0;
+  for (const child of children) {
+    try {
+      const info = await io.stat(child);
+      const modified = Number(info.lastModified || info.lastModifiedTime || 0);
+      if (modified && now - modified >= maxAgeMs) {
+        await io.remove(child, { recursive: true, ignoreAbsent: true });
+        removed += 1;
+      }
+    } catch { /* 临时文件被占用时留待下次清理。 */ }
+  }
+  return removed;
+}
+
+function clipboardTempRoot() {
+  const systemTemp = PathUtils.tempDir || Services.dirsvc.get("TmpD", Ci.nsIFile).path;
+  return PathUtils.join(systemTemp, "zotero-ai-reader-clipboard");
+}
+
+function transferableForFile(file) {
+  const transferable = Components.classes["@mozilla.org/widget/transferable;1"]
+    .createInstance(Ci.nsITransferable);
+  transferable.init(null);
+  transferable.addDataFlavor("application/x-moz-file");
+  try {
+    transferable.setTransferData("application/x-moz-file", file);
+  } catch {
+    // Zotero 6/7 所用的旧 Gecko 接口还要求长度参数。
+    transferable.setTransferData("application/x-moz-file", file, 0);
+  }
+  return transferable;
+}
+
+export async function copyLocalPDFToClipboard(path, {
+  createFile = localFileFromPath,
+  createTransferable = transferableForFile,
+  clipboard = globalThis.Services?.clipboard,
+  reveal,
+} = {}) {
+  const file = createFile(path);
+  const fileName = String(file?.leafName || String(path).split(/[\\/]/).pop() || "PDF");
+  if (!file?.exists?.() || !file?.isFile?.() || !file?.isReadable?.()) {
+    throw new Error("PDF 本地文件不存在或不可读，请先在 Zotero 中恢复附件。");
+  }
+  try {
+    if (!clipboard?.setData) throw new Error("系统剪贴板接口不可用");
+    clipboard.setData(createTransferable(file), null, clipboard.kGlobalClipboard);
+    return { status: "copied", fileName };
+  } catch (error) {
+    try {
+      if (reveal) await reveal(file, path);
+      else if (typeof file.reveal === "function") file.reveal();
+      else throw new Error("系统不支持定位文件");
+      return { status: "revealed", fileName, reason: error?.message || String(error) };
+    } catch (revealError) {
+      throw new Error(`无法复制 PDF，也无法在文件管理器中定位：${revealError?.message || error?.message || revealError}`);
+    }
+  }
+}
+
+export async function copyPDFToClipboard(itemID) {
+  const item = Zotero.Items.get(itemID);
+  const sourcePath = await resolvePDFAttachmentPath(item);
+  const desiredFileName = chooseClipboardPDFName(item, sourcePath);
+  let prepared;
+  try {
+    prepared = await prepareClipboardPDF(sourcePath, desiredFileName, {
+      io: IOUtils,
+      path: PathUtils,
+      tempRoot: clipboardTempRoot(),
+      uuid: () => Services.uuid.generateUUID().toString(),
+    });
+  } catch (error) {
+    Zotero.logError(error);
+    prepared = { path: sourcePath, fileName: leafNameFromPath(sourcePath), temporary: false, filenameFallback: true };
+  }
+  const result = await copyLocalPDFToClipboard(prepared.path, {
+    clipboard: Services.clipboard,
+    reveal: () => localFileFromPath(sourcePath).reveal(),
+  });
+  return { ...result, fileName: prepared.fileName, temporary: prepared.temporary,
+    filenameFallback: Boolean(prepared.filenameFallback) };
+}
+
+export async function resolvePDFAttachmentPath(item) {
+  if (!item?.isAttachment?.()) throw new Error("当前 Reader 未关联 PDF 附件。");
+  const path = await item.getFilePathAsync();
+  if (!path) throw new Error("当前 PDF 没有可用的本地文件。");
+  const contentType = String(item.attachmentContentType || "").toLowerCase();
+  if (contentType !== "application/pdf" && !/\.pdf$/i.test(path)) {
+    throw new Error("当前附件不是 PDF 文件。");
+  }
+  return path;
 }
 
 export async function createJob({ itemID, pageRange, totalPages, forceRetranslate = false }) {
@@ -1127,47 +1498,144 @@ async function findHomeLegacyDocuments(item) {
   return collectLegacyDocuments(legacyDir, legacyHash, "legacy-home");
 }
 
-export function getAPIKeyStatus() {
-  return requireRuntime().secrets.status();
+export async function listProfiles() {
+  const profiles = profileRecords();
+  const activeId = activeProfileId(profiles);
+  return Promise.all(profiles.map(async (profile) => ({
+    ...profile, active: profile.id === activeId,
+    keyStatus: profile.requiresApiKey
+      ? await requireRuntime().secrets.status(profile.id)
+      : { configured: true, masked: "无需密钥" },
+  })));
 }
 
-export async function configureAPIKey(key) {
-  await requireRuntime().translator.testKey(String(key || "").trim());
-  return requireRuntime().secrets.set(key);
+export function setActiveProfile(profileId) {
+  const profiles = profileRecords();
+  if (!profiles.some((profile) => profile.id === profileId)) throw new Error("配置档案不存在");
+  setPref("activeProfileId", profileId);
+  return configFromPrefs(profileId);
 }
 
-export async function testAPIKey() {
-  const key = await requireRuntime().secrets.get();
-  if (!key) throw new Error("尚未配置 DeepSeek API Key");
-  await requireRuntime().translator.testKey(key);
+export function upsertProfile(input) {
+  const profiles = profileRecords();
+  const requestedId = String(input?.id || "");
+  const builtin = PROVIDER_PRESETS.find((profile) => profile.id === requestedId);
+  if (builtin) {
+    const index = profiles.findIndex((profile) => profile.id === requestedId);
+    profiles[index] = { ...profiles[index], model: String(input.model ?? profiles[index].model) };
+    persistProfiles(profiles);
+    return profiles[index];
+  }
+  const id = requestedId.startsWith("custom-")
+    ? requestedId
+    : `custom-${Services.uuid.generateUUID().toString().replace(/[{}]/g, "")}`;
+  const profile = {
+    id, name: String(input?.name || "").trim(), baseUrl: normalizeBaseUrl(input?.baseUrl),
+    model: String(input?.model || "").trim(), requiresApiKey: input?.requiresApiKey !== false, builtin: false,
+  };
+  if (!profile.name) throw new Error("请填写配置名称");
+  const index = profiles.findIndex((item) => item.id === id);
+  if (index >= 0) profiles[index] = profile;
+  else profiles.push(profile);
+  persistProfiles(profiles);
+  return profile;
+}
+
+export async function deleteProfile(profileId) {
+  const profiles = profileRecords();
+  const target = profiles.find((profile) => profile.id === profileId);
+  if (!target) return false;
+  if (target.builtin) throw new Error("内置服务商不能删除");
+  persistProfiles(profiles.filter((profile) => profile.id !== profileId));
+  await requireRuntime().secrets.clear(profileId);
+  if (activeProfileId(profiles) === profileId) setPref("activeProfileId", "deepseek");
   return true;
 }
 
-export function clearAPIKey() {
-  return requireRuntime().secrets.clear();
+export function getAPIKeyStatus(profileId = null) {
+  const config = configFromPrefs(profileId);
+  if (!config.requiresApiKey) return Promise.resolve({ configured: true, masked: "无需密钥" });
+  return requireRuntime().secrets.status(config.profileId);
+}
+
+export async function listModels(profileId = null, optionalKey = undefined) {
+  const config = configFromPrefs(profileId);
+  const key = optionalKey === undefined ? await requireRuntime().secrets.get(config.profileId) : String(optionalKey || "").trim();
+  if (config.requiresApiKey && !key) throw new Error(`尚未配置 ${config.profileName} API Key`);
+  return requireRuntime().translator.listModels(config, key);
+}
+
+export async function testConnection(profileId = null, optionalKey = undefined) {
+  const config = configFromPrefs(profileId);
+  const key = optionalKey === undefined ? await requireRuntime().secrets.get(config.profileId) : String(optionalKey || "").trim();
+  if (config.requiresApiKey && !key) throw new Error(`尚未配置 ${config.profileName} API Key`);
+  try {
+    const models = await requireRuntime().translator.listModels(config, key);
+    return { ok: true, models, warning: null };
+  } catch (error) {
+    if ([401, 403].includes(errorStatus(error))) throw error;
+    return { ok: false, models: [], warning: `${error.message}；配置仍可保存，将在首次翻译时验证。` };
+  }
+}
+
+export async function configureAPIKey(profileId, key) {
+  if (key === undefined) { key = profileId; profileId = null; }
+  const config = configFromPrefs(profileId);
+  const value = String(key || "").trim();
+  if (!value) throw new Error("请输入 API Key");
+  const result = await testConnection(config.profileId, value);
+  const status = await requireRuntime().secrets.set(value, config.profileId);
+  return { ...status, warning: result.warning };
+}
+
+export async function testAPIKey(profileId = null) {
+  const result = await testConnection(profileId);
+  if (!result.ok) throw new Error(result.warning);
+  return true;
+}
+
+export function clearAPIKey(profileId = null) {
+  return requireRuntime().secrets.clear(configFromPrefs(profileId).profileId);
 }
 
 export function getSettings() {
   const config = configFromPrefs();
   return {
+    profileId: config.profileId,
     model: config.model,
     timeoutMs: config.timeoutMs,
     retryCount: config.retryCount,
     maxBatchChars: config.maxBatchChars,
     concurrency: config.concurrency,
     translationFontSize: config.translationFontSize,
+    questionContentSource: config.questionContentSource,
+    questionPromptTemplate: config.questionPromptTemplate,
   };
 }
 
 export function saveSettings(settings) {
+  const config = configFromPrefs(settings.profileId || null);
+  const questionPromptTemplate = inspectQuestionPromptTemplate(
+    settings.questionPromptTemplate ?? config.questionPromptTemplate,
+  ).template;
   const values = {
-    model: String(settings.model || "deepseek-flash"),
+    model: String(settings.model ?? config.model),
     timeoutMs: Math.max(10_000, Number(settings.timeoutMs || 90_000)),
     retryCount: Math.max(0, Number(settings.retryCount || 2)),
     maxBatchChars: Math.max(1000, Number(settings.maxBatchChars || 7000)),
     concurrency: Math.max(1, Math.min(4, Number(settings.concurrency || 2))),
     translationFontSize: normalizeTranslationFontSize(settings.translationFontSize),
+    questionContentSource: normalizeQuestionContentSource(
+      settings.questionContentSource ?? config.questionContentSource,
+    ),
+    questionPromptTemplate,
   };
-  for (const [name, value] of Object.entries(values)) Zotero.Prefs.set(`${PREF_PREFIX}${name}`, value, true);
-  return values;
+  const profiles = profileRecords();
+  const index = profiles.findIndex((profile) => profile.id === config.profileId);
+  profiles[index] = { ...profiles[index], model: values.model };
+  persistProfiles(profiles);
+  for (const [name, value] of Object.entries(values)) {
+    if (name !== "model") setPref(name, value);
+  }
+  return { ...values, profileId: config.profileId };
 }
