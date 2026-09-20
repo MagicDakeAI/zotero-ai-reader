@@ -1,0 +1,7 @@
+node_modules/
+dist/
+.cache/
+*.xpi
+coverage/
+Better_than_Average_fulltext.txt
+.DS_Store

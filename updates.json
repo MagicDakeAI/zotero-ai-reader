@@ -1,0 +1,19 @@
+{
+  "addons": {
+    "zotero-ai-reader@magicdake.github.io": {
+      "updates": [
+        {
+          "version": "0.6.6",
+          "update_link": "https://github.com/LeyangGu/zotero-ai-reader/releases/download/v0.6.6/zotero-ai-reader-0.6.6.xpi",
+          "update_hash": "sha256:f44d6e2775d8f8d8172ac09305bc9ef56aa481d9bfebeb84cff4bb25d397f623",
+          "applications": {
+            "zotero": {
+              "strict_min_version": "10.0.2",
+              "strict_max_version": "10.0.*"
+            }
+          }
+        }
+      ]
+    }
+  }
+}

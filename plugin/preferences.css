@@ -1,0 +1,9 @@
+.zai-pref-row { gap: 8px; margin: 6px 0; }
+#zai-pref-key { min-width: 330px; padding: 6px 8px; }
+.zai-pref-message { min-height: 20px; margin-top: 6px; }
+.zai-pref-message[data-kind="success"] { color: #047857; }
+.zai-pref-message[data-kind="error"] { color: #be123c; }
+.zai-pref-grid { display: grid; grid-template-columns: 150px minmax(180px, 320px); gap: 8px 12px; align-items: center; margin: 12px 0; }
+.zai-pref-grid input { padding: 5px 7px; }
+.zai-font-size-row output { min-width: 42px; font-variant-numeric: tabular-nums; }
+#zai-pref-translation-font-size { width: 190px; }

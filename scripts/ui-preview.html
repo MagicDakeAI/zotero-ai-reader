@@ -1,0 +1,15 @@
+<!doctype html>
+<html lang="zh-CN"><meta charset="utf-8"><title>AI Reader · 本地界面检查</title>
+<style>
+body{margin:0;background:#f5f6f8;color:#263247;font:14px system-ui}header{height:48px;display:flex;align-items:center;justify-content:flex-end;padding:0 20px;border-bottom:1px solid #ddd;background:#fafafa}main{max-width:760px;margin:60px auto;background:white;padding:40px;border:1px solid #e5e7eb}p{line-height:1.8;color:#657086}.toolbar-button{width:28px;padding:4px}button{cursor:pointer}
+</style>
+<header><span style="margin-right:auto">PDF 阅读器 · UI 预览</span><div id="toolbar"></div><span style="margin-left:12px">Aa　⌕</span></header>
+<main><h1>AI 翻译界面检查</h1><p>本页面使用插件实际界面代码及模拟任务数据，不会请求 API。点击右上角 AI 翻译，再点击开始翻译，即可查看任务卡片和后台进度按钮。</p></main>
+<script>
+const job={id:'preview',status:'running',phase:'generating',startedAt:Date.now(),pageCurrent:3,pageTotal:10,paragraphCurrent:24,paragraphTotal:80,paragraphTranslated:24,batchCurrent:2,batchTotal:8,batchActive:2};
+const reader={itemID:1,_iframeWindow:window};
+window.PDFViewerApplication={pagesCount:10};
+window.Zotero={logError:console.error,Reader:{registerEventListener(name,handler){handler({reader,doc:document,append:node=>document.querySelector('#toolbar').append(node)})}},AIReaderService:{restore:async()=>({hit:false}),getAPIKeyStatus:async()=>({configured:true}),createJob:async()=>job,getJob:()=>job,cancelJob:()=>({...job,status:'cancelled',phase:'done'})}};
+</script>
+<script src="../plugin/content/ai-reader.js"></script><script>AIReader.init();</script>
+</html>

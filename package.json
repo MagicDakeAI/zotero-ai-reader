@@ -1,0 +1,30 @@
+{
+  "name": "zotero-ai-reader",
+  "version": "0.6.6",
+  "private": true,
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/LeyangGu/zotero-ai-reader.git"
+  },
+  "homepage": "https://github.com/LeyangGu/zotero-ai-reader",
+  "bugs": {
+    "url": "https://github.com/LeyangGu/zotero-ai-reader/issues"
+  },
+  "description": "Zotero 10 非线性 AI 论文翻译 MVP",
+  "type": "module",
+  "scripts": {
+    "build:runtime": "node scripts/build-runtime.js",
+    "dev": "node scripts/build-runtime.js --watch",
+    "test": "npm run build:runtime && node --test",
+    "build:xpi": "npm run build:runtime && node scripts/build-xpi.js"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "devDependencies": {
+    "archiver": "^7.0.1",
+    "esbuild": "^0.25.9",
+    "katex": "0.16.22"
+  }
+}

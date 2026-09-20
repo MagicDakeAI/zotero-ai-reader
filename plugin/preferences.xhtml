@@ -1,0 +1,51 @@
+<vbox xmlns="http://www.mozilla.org/keymaster/gatekeeper/there.is.only.xul"
+      xmlns:html="http://www.w3.org/1999/xhtml"
+      onload="ZoteroAIReaderPrefs.init()">
+  <groupbox>
+    <label><html:h2>DeepSeek API</html:h2></label>
+    <description>密钥保存在 Zotero 的加密登录存储中，不会写入插件设置、日志或翻译缓存。</description>
+    <hbox align="center" class="zai-pref-row">
+      <label value="状态" control="zai-pref-key"/>
+      <html:strong id="zai-pref-key-status">正在检查…</html:strong>
+    </hbox>
+    <hbox align="center" class="zai-pref-row">
+      <html:input id="zai-pref-key" type="password" placeholder="粘贴新的 DeepSeek API Key" autocomplete="off"/>
+      <button label="验证并保存" oncommand="ZoteroAIReaderPrefs.saveKey()"/>
+      <button label="测试连接" oncommand="ZoteroAIReaderPrefs.testConnection()"/>
+      <button label="清除" oncommand="ZoteroAIReaderPrefs.clearKey()"/>
+    </hbox>
+    <description id="zai-pref-message" class="zai-pref-message"/>
+  </groupbox>
+
+  <groupbox>
+    <label><html:h2>阅读显示</html:h2></label>
+    <description>调整 PDF 内 AI 译文卡片的字体大小。</description>
+    <hbox align="center" class="zai-pref-row zai-font-size-row">
+      <label value="译文字号" control="zai-pref-translation-font-size"/>
+      <html:input id="zai-pref-translation-font-size" type="range" min="12" max="22" step="1"
+        oninput="ZoteroAIReaderPrefs.updateFontSizeLabel()"/>
+      <html:output id="zai-pref-translation-font-size-value" for="zai-pref-translation-font-size">16 px</html:output>
+      <button label="保存显示设置" oncommand="ZoteroAIReaderPrefs.saveDisplaySettings()"/>
+    </hbox>
+  </groupbox>
+
+  <groupbox>
+    <label><html:h2>高级设置</html:h2></label>
+    <html:details>
+      <html:summary>模型、批次与重试参数</html:summary>
+      <html:div class="zai-pref-grid">
+        <html:label for="zai-pref-model">模型</html:label>
+        <html:input id="zai-pref-model" type="text"/>
+        <html:label for="zai-pref-batch">单批字符数</html:label>
+        <html:input id="zai-pref-batch" type="number" min="1000" step="500"/>
+        <html:label for="zai-pref-concurrency">并发批次</html:label>
+        <html:input id="zai-pref-concurrency" type="number" min="1" max="4"/>
+        <html:label for="zai-pref-timeout">超时（毫秒）</html:label>
+        <html:input id="zai-pref-timeout" type="number" min="10000" step="5000"/>
+        <html:label for="zai-pref-retries">自动重试次数</html:label>
+        <html:input id="zai-pref-retries" type="number" min="0" max="10"/>
+      </html:div>
+      <html:button type="button" onclick="ZoteroAIReaderPrefs.saveAdvanced()">保存高级设置</html:button>
+    </html:details>
+  </groupbox>
+</vbox>
