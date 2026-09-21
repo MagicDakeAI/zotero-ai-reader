@@ -1272,13 +1272,23 @@ export function isOpaquePDFFilename(value) {
   return !base || UUID_FILE_NAME.test(base) || /^[0-9a-f]{20,}$/i.test(base) || GENERIC_PDF_NAMES.test(base);
 }
 
-export function chooseClipboardPDFName(item, sourcePath) {
+export function chooseClipboardPDFName(item, sourcePath, {
+  getItem = (itemID) => Zotero.Items.get(itemID),
+} = {}) {
+  let parentTitle = "";
+  if (item?.parentItemID) {
+    try {
+      parentTitle = String(getItem?.(item.parentItemID)?.getField?.("title") || "").trim();
+    } catch { /* 父条目暂时不可用时继续使用附件信息。 */ }
+  }
+  if (parentTitle) return sanitizeClipboardPDFName(parentTitle);
+
+  const attachmentTitle = String(item?.getField?.("title") || "").trim();
+  if (!isOpaquePDFFilename(attachmentTitle)) return sanitizeClipboardPDFName(attachmentTitle);
+
   const attachmentName = String(item?.attachmentFilename || leafNameFromPath(sourcePath));
   if (!isOpaquePDFFilename(attachmentName)) return sanitizeClipboardPDFName(attachmentName);
-  const parentTitle = String(item?.parentItem?.getField?.("title") || "").trim();
-  const attachmentTitle = String(item?.getField?.("title") || "").trim();
-  const title = parentTitle || (!isOpaquePDFFilename(attachmentTitle) ? attachmentTitle : "") || attachmentName;
-  return sanitizeClipboardPDFName(title);
+  return "paper.pdf";
 }
 
 export async function prepareClipboardPDF(sourcePath, desiredFileName, {

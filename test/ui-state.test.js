@@ -162,7 +162,7 @@ test("译文浮层样式允许选择、交互和自定义字号", async () => {
   assert.match(source, /复制提问/);
   assert.match(source, /复制整篇 PDF/);
   assert.match(source, /copyPDFToClipboard\(itemID\)/);
-  assert.match(source, /feedback\.textContent = "已复制 PDF。"/);
+  assert.match(source, /feedback\.textContent = `已复制：\$\{result\.fileName \|\| "PDF"\}`/);
   assert.doesNotMatch(source, /已复制 PDF，请先到 ChatGPT/);
   assert.match(source, /copySelected\.disabled = true/);
   assert.match(source, /aria-expanded", "false/);
@@ -361,6 +361,79 @@ test("Reader 打开后自动检查缓存并持续等待 PDF 页面挂载", async
   assert.doesNotMatch(source, /overlayStates\.get\(itemID\)/);
   assert.match(source, /label = "已有译文"/);
   assert.match(source, /译文已自动显示/);
+});
+
+test("译文卡片优先使用侧边空白并在必要时缩窄到最小可读宽度", async () => {
+  const { calculateTooltipPosition } = await loadUIHelpers();
+  const base = { viewportWidth: 1200, viewportHeight: 800, tooltipWidth: 400, tooltipHeight: 360 };
+
+  const right = calculateTooltipPosition({
+    ...base, anchorRect: { left: 120, right: 520, top: 90, bottom: 240 },
+  });
+  assert.equal(right.placement, "right");
+  assert.equal(right.left, 528);
+  assert.equal(right.top, 90);
+
+  const left = calculateTooltipPosition({
+    ...base, anchorRect: { left: 680, right: 1080, top: 120, bottom: 260 },
+  });
+  assert.equal(left.placement, "left");
+  assert.equal(left.left, 272);
+
+  const narrowMargin = calculateTooltipPosition({
+    viewportWidth: 1700, viewportHeight: 1000, tooltipWidth: 440, tooltipHeight: 500,
+    anchorRect: { left: 315, right: 1390, top: 220, bottom: 805 },
+  });
+  assert.equal(narrowMargin.placement, "right");
+  assert.equal(narrowMargin.width, 290);
+  assert.equal(narrowMargin.left, 1398);
+  assert.equal(narrowMargin.left + narrowMargin.width, 1688);
+});
+
+test("两侧空白不足时译文卡片按首次阅读位置停靠到对角角落", async () => {
+  const { calculateTooltipPosition } = await loadUIHelpers();
+  const base = {
+    viewportWidth: 1000, viewportHeight: 800, tooltipWidth: 400, tooltipHeight: 300,
+    anchorRect: { left: 40, right: 960, top: 120, bottom: 680 },
+  };
+  const cases = [
+    [{ pointerX: 100, pointerY: 100 }, "corner-bottom-right", 588, 488],
+    [{ pointerX: 900, pointerY: 100 }, "corner-bottom-left", 12, 488],
+    [{ pointerX: 100, pointerY: 700 }, "corner-top-right", 588, 12],
+    [{ pointerX: 900, pointerY: 700 }, "corner-top-left", 12, 12],
+  ];
+  for (const [pointer, placement, left, top] of cases) {
+    const position = calculateTooltipPosition({ ...base, ...pointer });
+    assert.equal(position.placement, placement);
+    assert.equal(position.left, left);
+    assert.equal(position.top, top);
+  }
+});
+
+test("译文卡片缺少鼠标坐标时使用段落中心，并在小窗口内保持可见", async () => {
+  const { calculateTooltipPosition } = await loadUIHelpers();
+  const fallback = calculateTooltipPosition({
+    viewportWidth: 1000, viewportHeight: 800, tooltipWidth: 400, tooltipHeight: 300,
+    anchorRect: { left: 40, right: 960, top: 40, bottom: 360 },
+  });
+  assert.equal(fallback.placement, "corner-bottom-right");
+  assert.equal(fallback.left, 588);
+  assert.equal(fallback.top, 488);
+
+  const small = calculateTooltipPosition({
+    viewportWidth: 360, viewportHeight: 280, tooltipWidth: 440, tooltipHeight: 600,
+    anchorRect: { left: 20, right: 340, top: 250, bottom: 275 },
+  });
+  assert.equal(small.width, 336);
+  assert.equal(small.left, 12);
+  assert.equal(small.top, 12);
+  assert.match(small.placement, /^corner-/);
+});
+
+test("译文卡片仅在首次悬停时定位，不监听鼠标移动持续跳动", async () => {
+  const source = await fs.readFile(new URL("../plugin/content/ai-reader.js", import.meta.url), "utf8");
+  assert.match(source, /positionTooltip\(doc, tooltip, event\.currentTarget, event\)/);
+  assert.doesNotMatch(source, /addEventListener\("mousemove"/);
 });
 
 test("已有缓存时提供明确的重新翻译入口和费用确认", async () => {

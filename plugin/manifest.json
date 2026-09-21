@@ -1,7 +1,7 @@
 {
   "manifest_version": 2,
   "name": "Zotero AI Reader",
-  "version": "0.6.6",
+  "version": "0.6.8",
   "description": "仅翻译选定 PDF 页面，并显示段落摘要与悬停译文",
   "author": "Leyang Gu",
   "applications": {

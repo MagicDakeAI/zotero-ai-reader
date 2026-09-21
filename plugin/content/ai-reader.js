@@ -1283,7 +1283,7 @@ var AIReader = (() => {
       const result = await Zotero.AIReaderService.copyPDFToClipboard(itemID);
       button.dataset.copied = result.status === "copied" ? "true" : "revealed";
       if (result.status === "copied") {
-        feedback.textContent = "已复制 PDF。";
+        feedback.textContent = `已复制：${result.fileName || "PDF"}`;
         feedbackDuration = 1800;
       } else {
         feedback.textContent = "系统未能直接复制 PDF，已在文件管理器中定位，请手动复制或拖入 ChatGPT。";
@@ -1347,27 +1347,77 @@ var AIReader = (() => {
     }, 180));
   }
 
-  function positionTooltip(doc, tooltip, anchor, event) {
-    const margin = 12;
-    const gap = 8;
-    const viewportWidth = doc.defaultView.innerWidth;
-    const viewportHeight = doc.defaultView.innerHeight;
-    const anchorRect = anchor?.getBoundingClientRect?.();
-    const width = tooltip.offsetWidth;
-    const height = tooltip.offsetHeight;
-    const pointerX = Number(event?.clientX) || margin;
-    const pointerY = Number(event?.clientY) || margin;
-    let left = anchorRect ? anchorRect.right + gap : pointerX + gap;
-    if (left + width > viewportWidth - margin) {
-      left = anchorRect && anchorRect.left - width - gap >= margin
-        ? anchorRect.left - width - gap
-        : pointerX - width - gap;
+  function calculateTooltipPosition({
+    viewportWidth, viewportHeight, tooltipWidth, tooltipHeight, anchorRect, pointerX, pointerY,
+    margin = 12, gap = 8, minReadableWidth = 280, maxWidth = 440,
+  }) {
+    const widthLimit = Math.min(
+      maxWidth,
+      Math.max(0, tooltipWidth),
+      Math.max(0, viewportWidth - margin * 2),
+    );
+    const height = Math.min(Math.max(0, tooltipHeight), Math.max(0, viewportHeight - margin * 2));
+    const rect = anchorRect || { left: margin, right: margin, top: margin, bottom: margin };
+    const leftAvailable = Math.max(0, rect.left - gap - margin);
+    const rightAvailable = Math.max(0, viewportWidth - margin - gap - rect.right);
+    const rightCandidate = rightAvailable >= minReadableWidth
+      ? { side: "right", available: rightAvailable } : null;
+    const leftCandidate = leftAvailable >= minReadableWidth
+      ? { side: "left", available: leftAvailable } : null;
+    const sideCandidate = rightCandidate && leftCandidate
+      ? (leftAvailable > rightAvailable + 24 ? leftCandidate : rightCandidate)
+      : rightCandidate || leftCandidate;
+    let width = widthLimit;
+    let left;
+    let top;
+    let placement;
+
+    if (sideCandidate) {
+      const candidate = sideCandidate;
+      width = Math.min(widthLimit, candidate.available);
+      left = candidate.side === "right" ? rect.right + gap : rect.left - gap - width;
+      top = Number(rect.top) || margin;
+      placement = candidate.side;
+    } else {
+      const anchorCenterX = (Number(rect.left) + Number(rect.right)) / 2;
+      const anchorCenterY = (Number(rect.top) + Number(rect.bottom)) / 2;
+      const readingX = Number.isFinite(Number(pointerX)) ? Number(pointerX) : anchorCenterX;
+      const readingY = Number.isFinite(Number(pointerY)) ? Number(pointerY) : anchorCenterY;
+      const dockRight = readingX <= viewportWidth / 2;
+      const dockBottom = readingY <= viewportHeight / 2;
+      left = dockRight ? viewportWidth - margin - width : margin;
+      top = dockBottom ? viewportHeight - margin - height : margin;
+      placement = `corner-${dockBottom ? "bottom" : "top"}-${dockRight ? "right" : "left"}`;
     }
-    let top = anchorRect ? Math.max(anchorRect.top, pointerY - 24) : pointerY + gap;
-    left = Math.max(margin, Math.min(left, viewportWidth - width - margin));
-    top = Math.max(margin, Math.min(top, viewportHeight - height - margin));
-    tooltip.style.left = `${left}px`;
-    tooltip.style.top = `${top}px`;
+
+    const maxLeft = Math.max(margin, viewportWidth - width - margin);
+    const maxTop = Math.max(margin, viewportHeight - height - margin);
+    return {
+      width,
+      left: Math.max(margin, Math.min(left, maxLeft)),
+      top: Math.max(margin, Math.min(top, maxTop)),
+      placement,
+    };
+  }
+
+  function positionTooltip(doc, tooltip, anchor, event) {
+    const base = {
+      viewportWidth: doc.defaultView.innerWidth,
+      viewportHeight: doc.defaultView.innerHeight,
+      anchorRect: anchor?.getBoundingClientRect?.(),
+      pointerX: event?.clientX,
+      pointerY: event?.clientY,
+    };
+    let position = calculateTooltipPosition({
+      ...base, tooltipWidth: tooltip.offsetWidth, tooltipHeight: tooltip.offsetHeight,
+    });
+    tooltip.style.width = `${position.width}px`;
+    position = calculateTooltipPosition({
+      ...base, tooltipWidth: position.width, tooltipHeight: tooltip.offsetHeight,
+    });
+    tooltip.style.left = `${position.left}px`;
+    tooltip.style.top = `${position.top}px`;
+    tooltip.dataset.placement = position.placement;
   }
 
   function injectStyles(doc) {
@@ -1601,5 +1651,5 @@ var AIReader = (() => {
     doc.head.append(link);
   }
 
-  return { init, shutdown, _test: { taskView, renderActions, buildChatGPTPrompt, normalizeMathBoundaryText, classifyMathBoundaryContent, isPureNumericBracketCitation, extractObsidianMathMarkdown, selectedFormulaState, translationFontSize, shouldRenderParagraph, renderMathText, renderOverlays } };
+  return { init, shutdown, _test: { taskView, renderActions, buildChatGPTPrompt, normalizeMathBoundaryText, classifyMathBoundaryContent, isPureNumericBracketCitation, extractObsidianMathMarkdown, selectedFormulaState, translationFontSize, shouldRenderParagraph, renderMathText, renderOverlays, calculateTooltipPosition } };
 })();

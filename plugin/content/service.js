@@ -1539,13 +1539,22 @@ ${translation}`].filter(Boolean).join("\n\n");
     const base = String(value || "").replace(/\.pdf$/i, "").trim();
     return !base || UUID_FILE_NAME.test(base) || /^[0-9a-f]{20,}$/i.test(base) || GENERIC_PDF_NAMES.test(base);
   }
-  function chooseClipboardPDFName(item, sourcePath) {
+  function chooseClipboardPDFName(item, sourcePath, {
+    getItem = (itemID) => Zotero.Items.get(itemID)
+  } = {}) {
+    let parentTitle = "";
+    if (item?.parentItemID) {
+      try {
+        parentTitle = String(getItem?.(item.parentItemID)?.getField?.("title") || "").trim();
+      } catch {
+      }
+    }
+    if (parentTitle) return sanitizeClipboardPDFName(parentTitle);
+    const attachmentTitle = String(item?.getField?.("title") || "").trim();
+    if (!isOpaquePDFFilename(attachmentTitle)) return sanitizeClipboardPDFName(attachmentTitle);
     const attachmentName = String(item?.attachmentFilename || leafNameFromPath(sourcePath));
     if (!isOpaquePDFFilename(attachmentName)) return sanitizeClipboardPDFName(attachmentName);
-    const parentTitle = String(item?.parentItem?.getField?.("title") || "").trim();
-    const attachmentTitle = String(item?.getField?.("title") || "").trim();
-    const title = parentTitle || (!isOpaquePDFFilename(attachmentTitle) ? attachmentTitle : "") || attachmentName;
-    return sanitizeClipboardPDFName(title);
+    return "paper.pdf";
   }
   async function prepareClipboardPDF(sourcePath, desiredFileName, {
     io = globalThis.IOUtils,

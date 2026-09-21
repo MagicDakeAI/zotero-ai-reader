@@ -96,16 +96,28 @@ test("PDF 文件以 application\/x-moz-file 写入剪贴板", async () => {
   assert.equal(calls[1][1].flavor, "application/x-moz-file");
 });
 
-test("PDF 智能命名保留正常附件名，UUID 和通用名回退论文标题", () => {
-  const item = (attachmentFilename, parentTitle = "A Study of Foundation Models", attachmentTitle = "PDF") => ({
-    attachmentFilename,
-    parentItem: { getField: () => parentTitle },
-    getField: () => attachmentTitle,
+test("PDF 智能命名通过 parentItemID 始终优先使用论文标题", () => {
+  const parents = new Map([
+    [101, { getField: () => "A Study of Foundation Models" }],
+    [102, { getField: () => "肿瘤边界：方法/评估" }],
+  ]);
+  const getItem = (itemID) => parents.get(itemID);
+  const item = (attachmentFilename, parentItemID, attachmentTitle = "PDF") => ({
+    attachmentFilename, parentItemID, getField: () => attachmentTitle,
   });
-  assert.equal(chooseClipboardPDFName(item("authors-2026-models.pdf"), "C:\\z\\uuid.pdf"), "authors-2026-models.pdf");
-  assert.equal(chooseClipboardPDFName(item("a691caca-8be2-40e7-a9d2-86963f4924e1.pdf"), "uuid.pdf"), "A Study of Foundation Models.pdf");
-  assert.equal(chooseClipboardPDFName(item("fulltext.pdf", "肿瘤边界：方法/评估"), "fulltext.pdf"), "肿瘤边界：方法 评估.pdf");
-  assert.equal(chooseClipboardPDFName(item("document.pdf", "", "Readable attachment title"), "document.pdf"), "Readable attachment title.pdf");
+  assert.equal(chooseClipboardPDFName(item("authors-2026-models.pdf", 101), "C:\\z\\uuid.pdf", { getItem }), "A Study of Foundation Models.pdf");
+  assert.equal(chooseClipboardPDFName(item("a691caca-8be2-40e7-a9d2-86963f4924e1.pdf", 101), "uuid.pdf", { getItem }), "A Study of Foundation Models.pdf");
+  assert.equal(chooseClipboardPDFName(item("fulltext.pdf", 102), "fulltext.pdf", { getItem }), "肿瘤边界：方法 评估.pdf");
+});
+
+test("独立 PDF 或父条目缺失时按附件标题、文件名和 paper 依次降级", () => {
+  const getItem = () => undefined;
+  const item = (attachmentFilename, attachmentTitle = "PDF", parentItemID = null) => ({
+    attachmentFilename, parentItemID, getField: () => attachmentTitle,
+  });
+  assert.equal(chooseClipboardPDFName(item("document.pdf", "Readable attachment title"), "document.pdf", { getItem }), "Readable attachment title.pdf");
+  assert.equal(chooseClipboardPDFName(item("authors-2026-models.pdf"), "C:\\z\\uuid.pdf", { getItem }), "authors-2026-models.pdf");
+  assert.equal(chooseClipboardPDFName(item("423bea54-4260-4bd3-ae53-0d169696d831.pdf", "PDF", 999), "uuid.pdf", { getItem }), "paper.pdf");
 });
 
 test("PDF 文件名清理非法字符、Windows 保留名并限制长度", () => {
